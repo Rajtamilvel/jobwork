@@ -33,12 +33,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "MachinaWork Jobwork Engineer API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/api/health"
+    }
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "service": "jobwork-api"}
+
 @app.on_event("startup")
 def startup_event():
-    init_db()
-    # Auto-seed if empty
-    from seed_data import seed_database
-    seed_database()
+    try:
+        init_db()
+        from seed_data import seed_database
+        seed_database()
+    except Exception as e:
+        print("Startup warning (non-fatal):", e)
 
 # Helper to calculate lead time status
 def calculate_lead_status(date_sent_str, exp_date_str, status_text):

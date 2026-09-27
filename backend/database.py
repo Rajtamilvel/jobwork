@@ -2,12 +2,46 @@ import sqlite3
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 try:
     import psycopg2
-    from psycopg2.extras import RealDictCursor
 except ImportError:
     psycopg2 = None
+
+class PgRow:
+    """Supports both row['col'] and row[0] indexing, matching sqlite3.Row"""
+    def __init__(self, description, values):
+        self._values = list(values) if values else []
+        self._keys = [col[0].lower() for col in description] if description else []
+        self._dict = dict(zip(self._keys, self._values))
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return self._dict.get(key.lower())
+
+    def get(self, key, default=None):
+        return self._dict.get(key.lower(), default)
+
+    def keys(self):
+        return self._keys
+
+    def values(self):
+        return self._values
+
+    def items(self):
+        return self._dict.items()
+
+    def __iter__(self):
+        return iter(self._dict)
+
+    def __contains__(self, key):
+        return key.lower() in self._dict
+
+    def __repr__(self):
+        return repr(self._dict)
 
 class PgCursorWrapper:
     def __init__(self, pg_cursor):
@@ -28,13 +62,20 @@ class PgCursorWrapper:
         return self
 
     def fetchone(self):
-        return self._cursor.fetchone()
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        return PgRow(self._cursor.description, row)
 
     def fetchall(self):
-        return self._cursor.fetchall()
+        desc = self._cursor.description
+        rows = self._cursor.fetchall()
+        return [PgRow(desc, r) for r in rows] if rows else []
 
     def fetchmany(self, size=None):
-        return self._cursor.fetchmany(size)
+        desc = self._cursor.description
+        rows = self._cursor.fetchmany(size)
+        return [PgRow(desc, r) for r in rows] if rows else []
 
     @property
     def rowcount(self):
@@ -48,7 +89,7 @@ class PgConnectionWrapper:
         self._conn = pg_conn
 
     def cursor(self):
-        return PgCursorWrapper(self._conn.cursor(cursor_factory=RealDictCursor))
+        return PgCursorWrapper(self._conn.cursor())
 
     def commit(self):
         self._conn.commit()
@@ -61,10 +102,25 @@ class PgConnectionWrapper:
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobwork.db")
 
+# Vercel serverless writable SQLite fallback if DATABASE_URL is not set
+IS_SERVERLESS = os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+if IS_SERVERLESS and not DATABASE_URL:
+    import shutil
+    TMP_DB = "/tmp/jobwork.db"
+    if not os.path.exists(TMP_DB) and os.path.exists(DB_PATH):
+        try:
+            shutil.copyfile(DB_PATH, TMP_DB)
+        except Exception:
+            pass
+    DB_PATH = TMP_DB
+
 def get_db():
     if DATABASE_URL and psycopg2:
-        pg_conn = psycopg2.connect(DATABASE_URL)
-        return PgConnectionWrapper(pg_conn)
+        try:
+            pg_conn = psycopg2.connect(DATABASE_URL)
+            return PgConnectionWrapper(pg_conn)
+        except Exception as e:
+            print("Postgres connection error, falling back to local database:", e)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn

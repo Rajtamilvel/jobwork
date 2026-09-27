@@ -117,23 +117,77 @@ def verify_pwd(plain: str, stored_hash: str) -> bool:
         return True
     return False
 
+@app.get("/api/debug")
+def debug_info():
+    import traceback
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_KEY")
+    info = {
+        "DATABASE_URL_set": bool(os.getenv("DATABASE_URL")),
+        "SUPABASE_URL_set": bool(supabase_url),
+        "db_test": "unknown",
+        "error": None
+    }
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        row = cursor.fetchone()
+        info["users_count"] = row[0] if row else 0
+        info["db_test"] = "success"
+        conn.close()
+    except Exception as e:
+        info["db_test"] = "failed"
+        info["error"] = str(e)
+        info["traceback"] = traceback.format_exc()
+    return info
+
 @app.post("/api/auth/login")
 def login(payload: LoginRequest):
     """
     Authenticates user with User ID and Password.
     Returns session token and user profile.
+    Checks Supabase Cloud and local database.
     """
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-    SELECT id, username, password_hash, full_name, role 
-    FROM users 
-    WHERE LOWER(username) = LOWER(?)
-    """, (payload.username.strip(),))
-    user = cursor.fetchone()
-    conn.close()
+    username = payload.username.strip()
+    password = payload.password.strip()
 
-    if not user or not verify_pwd(payload.password.strip(), user["password_hash"]):
+    # 1. Check Supabase Cloud via REST API
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_KEY")
+
+    user = None
+    if supabase_url and supabase_key:
+        try:
+            import urllib.request, urllib.parse, json
+            q = urllib.parse.urlencode({"username": f"ilike.{username}", "select": "*"})
+            req = urllib.request.Request(
+                f"{supabase_url.rstrip('/')}/rest/v1/users?{q}",
+                headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                if data and len(data) > 0:
+                    user = data[0]
+        except Exception as e:
+            print("Supabase auth query note:", e)
+
+    # 2. Check SQL database (PostgreSQL via DATABASE_URL or SQLite)
+    if not user:
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+            SELECT id, username, password_hash, full_name, role 
+            FROM users 
+            WHERE LOWER(username) = LOWER(?)
+            """, (username,))
+            user = cursor.fetchone()
+            conn.close()
+        except Exception as e:
+            print("Database auth query note:", e)
+
+    if not user or not verify_pwd(password, user["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid User ID or Password. Please check your credentials."
@@ -146,7 +200,7 @@ def login(payload: LoginRequest):
             "id": user["id"],
             "username": user["username"],
             "full_name": user["full_name"],
-            "role": user["role"]
+            "role": user.get("role", "Engineer") if hasattr(user, "get") else user["role"]
         }
     }
 

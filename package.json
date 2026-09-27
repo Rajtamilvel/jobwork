@@ -7,7 +7,7 @@
     "backend": "python -m uvicorn main:app --host 127.0.0.1 --port 8000 --app-dir backend --reload",
     "client": "npm run dev --prefix client",
     "seed": "python backend/seed_data.py",
-    "build": "npm run build --prefix client"
+    "build": "npm --prefix client install && npm --prefix client run build && node -e \"const fs=require('fs'); fs.cpSync('client/dist', 'dist', {recursive: true, force: true});\""
   },
   "keywords": [
     "jobwork",

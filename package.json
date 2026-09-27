@@ -1,0 +1,23 @@
+{
+  "name": "jobwork-engineer-os",
+  "version": "1.0.0",
+  "description": "Personal Web Application for Jobwork Engineer: Material Tracking, Process Routing, Multi-Vendor Lead Times, Welding BOM, Delivery Follow-up",
+  "scripts": {
+    "dev": "node server.js",
+    "backend": "python -m uvicorn main:app --host 127.0.0.1 --port 8000 --app-dir backend --reload",
+    "client": "npm run dev --prefix client",
+    "seed": "python backend/seed_data.py",
+    "build": "npm run build --prefix client"
+  },
+  "keywords": [
+    "jobwork",
+    "manufacturing",
+    "cnc",
+    "subcontracting",
+    "routing",
+    "welding-bom",
+    "engineering"
+  ],
+  "author": "Jobwork Engineer",
+  "license": "MIT"
+}

@@ -1,14 +1,77 @@
 import sqlite3
 import os
 
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+
+class PgCursorWrapper:
+    def __init__(self, pg_cursor):
+        self._cursor = pg_cursor
+        self.lastrowid = None
+
+    def execute(self, query, params=None):
+        pg_query = query.replace('?', '%s')
+        if params is not None:
+            self._cursor.execute(pg_query, params)
+        else:
+            self._cursor.execute(pg_query)
+        return self
+
+    def executemany(self, query, seq_of_params):
+        pg_query = query.replace('?', '%s')
+        self._cursor.executemany(pg_query, seq_of_params)
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def fetchmany(self, size=None):
+        return self._cursor.fetchmany(size)
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def close(self):
+        self._cursor.close()
+
+class PgConnectionWrapper:
+    def __init__(self, pg_conn):
+        self._conn = pg_conn
+
+    def cursor(self):
+        return PgCursorWrapper(self._conn.cursor(cursor_factory=RealDictCursor))
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobwork.db")
 
 def get_db():
+    if DATABASE_URL and psycopg2:
+        pg_conn = psycopg2.connect(DATABASE_URL)
+        return PgConnectionWrapper(pg_conn)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
+    if DATABASE_URL and psycopg2:
+        return
     conn = get_db()
     cursor = conn.cursor()
     

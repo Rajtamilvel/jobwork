@@ -50,7 +50,7 @@ class VercelPathNormalizeMiddleware(BaseHTTPMiddleware):
             raw = raw.split("?")[0]
 
         # Strip any Vercel internal serverless filename artifacts
-        for artifact in ("/api/index.py", "/api/index"):
+        for artifact in ("/api/index.py", "/api/index", "/main.py", "/main"):
             if raw.startswith(artifact):
                 raw = raw[len(artifact):] or "/"
 
@@ -1197,7 +1197,7 @@ def list_items():
     LEFT JOIN raw_materials rm ON i.material_code = rm.code
     LEFT JOIN process_routes r ON i.item_code = r.item_code
     LEFT JOIN batches b ON i.item_code = b.item_code AND b.status != 'Completed'
-    GROUP BY i.id
+    GROUP BY i.id, rm.name, rm.unit
     ORDER BY i.item_code ASC
     """)
     items = [dict(row) for row in cursor.fetchall()]

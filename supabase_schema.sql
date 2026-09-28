@@ -246,3 +246,26 @@ INSERT INTO users (username, password_hash, full_name, role) VALUES
     ('rajtamil', '5b2e2649dd3e6dc87a53e7c2f5302de17de57caa2352d3e7c6bcda2c0dcbb3b4', 'Rajtamil', 'Chief Operating Officer'),
     ('supervisor', 'f8c46e11b25d7da8ee7a3e7ad4d0fa38c1dd5c0dd0c6a1e6cb0de0d7be6d5c3a', 'Shopfloor Supervisor', 'Supervisor')
 ON CONFLICT (username) DO NOTHING;
+
+-- =============================================
+-- 17. HTTPS RPC Bridge for API Key Connection (No database password needed)
+-- =============================================
+CREATE OR REPLACE FUNCTION exec_sql(query text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    result jsonb;
+    clean text := trim(query);
+BEGIN
+    IF clean ~* '^(SELECT|WITH)\s' OR clean ~* '\sRETURNING\s' THEN
+        EXECUTE 'SELECT coalesce(jsonb_agg(to_jsonb(t)), ''[]''::jsonb) FROM (' || clean || ') t' INTO result;
+        RETURN result;
+    ELSE
+        EXECUTE clean;
+        RETURN '[]'::jsonb;
+    END IF;
+END;
+$$;
+

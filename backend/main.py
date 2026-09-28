@@ -1,11 +1,15 @@
 import os
+import sys
 import uuid
-import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional, List
+
+# Ensure local backend modules can be imported in any deployment environment (e.g. Vercel)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from database import get_db, init_db
+from database import get_db, get_cursor, init_db
 from models import (
     LoginRequest,
     SignupRequest,
@@ -33,28 +37,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def root():
-    return {
-        "status": "online",
-        "service": "MachinaWork Jobwork Engineer API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/api/health"
-    }
-
-@app.get("/api/health")
-def health_check():
-    return {"status": "ok", "service": "jobwork-api"}
-
 @app.on_event("startup")
 def startup_event():
-    try:
-        init_db()
-        from seed_data import seed_database
-        seed_database()
-    except Exception as e:
-        print("Startup warning (non-fatal):", e)
+    init_db()
+    # Auto-seed if empty
+    from seed_data import seed_database
+    seed_database()
 
 # Helper to calculate lead time status
 def calculate_lead_status(date_sent_str, exp_date_str, status_text):
@@ -117,77 +105,23 @@ def verify_pwd(plain: str, stored_hash: str) -> bool:
         return True
     return False
 
-@app.get("/api/debug")
-def debug_info():
-    import traceback
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_KEY")
-    info = {
-        "DATABASE_URL_set": bool(os.getenv("DATABASE_URL")),
-        "SUPABASE_URL_set": bool(supabase_url),
-        "db_test": "unknown",
-        "error": None
-    }
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users")
-        row = cursor.fetchone()
-        info["users_count"] = row[0] if row else 0
-        info["db_test"] = "success"
-        conn.close()
-    except Exception as e:
-        info["db_test"] = "failed"
-        info["error"] = str(e)
-        info["traceback"] = traceback.format_exc()
-    return info
-
 @app.post("/api/auth/login")
 def login(payload: LoginRequest):
     """
     Authenticates user with User ID and Password.
     Returns session token and user profile.
-    Checks Supabase Cloud and local database.
     """
-    username = payload.username.strip()
-    password = payload.password.strip()
+    conn = get_db()
+    cursor = get_cursor(conn)
+    cursor.execute("""
+    SELECT id, username, password_hash, full_name, role 
+    FROM users 
+    WHERE LOWER(username) = LOWER(%s)
+    """, (payload.username.strip(),))
+    user = cursor.fetchone()
+    conn.close()
 
-    # 1. Check Supabase Cloud via REST API
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_KEY")
-
-    user = None
-    if supabase_url and supabase_key:
-        try:
-            import urllib.request, urllib.parse, json
-            q = urllib.parse.urlencode({"username": f"ilike.{username}", "select": "*"})
-            req = urllib.request.Request(
-                f"{supabase_url.rstrip('/')}/rest/v1/users?{q}",
-                headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-            )
-            with urllib.request.urlopen(req, timeout=5) as r:
-                data = json.loads(r.read().decode("utf-8"))
-                if data and len(data) > 0:
-                    user = data[0]
-        except Exception as e:
-            print("Supabase auth query note:", e)
-
-    # 2. Check SQL database (PostgreSQL via DATABASE_URL or SQLite)
-    if not user:
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("""
-            SELECT id, username, password_hash, full_name, role 
-            FROM users 
-            WHERE LOWER(username) = LOWER(?)
-            """, (username,))
-            user = cursor.fetchone()
-            conn.close()
-        except Exception as e:
-            print("Database auth query note:", e)
-
-    if not user or not verify_pwd(password, user["password_hash"]):
+    if not user or not verify_pwd(payload.password.strip(), user["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid User ID or Password. Please check your credentials."
@@ -200,7 +134,7 @@ def login(payload: LoginRequest):
             "id": user["id"],
             "username": user["username"],
             "full_name": user["full_name"],
-            "role": user.get("role", "Engineer") if hasattr(user, "get") else user["role"]
+            "role": user["role"]
         }
     }
 
@@ -234,10 +168,10 @@ def register(payload: SignupRequest):
         )
 
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
 
     # Check for existing username
-    cursor.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (username,))
+    cursor.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(%s)", (username,))
     existing = cursor.fetchone()
     if existing:
         conn.close()
@@ -251,9 +185,10 @@ def register(payload: SignupRequest):
 
     cursor.execute("""
     INSERT INTO users (username, password_hash, full_name, role)
-    VALUES (?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s)
+    RETURNING id
     """, (username, pwd_hash, full_name, role))
-    new_user_id = cursor.lastrowid
+    new_user_id = cursor.fetchone()["id"]
     conn.commit()
     conn.close()
 
@@ -273,7 +208,7 @@ def register(payload: SignupRequest):
 def get_auth_users():
     """Returns directory of authorized system users."""
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("SELECT id, username, full_name, role FROM users ORDER BY id ASC")
     users = [dict(r) for r in cursor.fetchall()]
     conn.close()
@@ -285,23 +220,23 @@ def get_auth_users():
 @app.get("/api/dashboard/overview")
 def get_dashboard_overview():
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # Summary counters
-    cursor.execute("SELECT COUNT(*) FROM batches WHERE status != 'Completed'")
-    total_active_batches = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE status != 'Completed'")
+    total_active_batches = cursor.fetchone()["count"]
     
-    cursor.execute("SELECT COUNT(*) FROM batches WHERE status = 'With Vendor'")
-    batches_with_vendors = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE status = 'With Vendor'")
+    batches_with_vendors = cursor.fetchone()["count"]
     
-    cursor.execute("SELECT COUNT(*) FROM batches WHERE is_inhouse = 1 AND status != 'Completed'")
-    batches_inhouse = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE is_inhouse = 1 AND status != 'Completed'")
+    batches_inhouse = cursor.fetchone()["count"]
     
-    cursor.execute("SELECT COUNT(*) FROM batches WHERE is_critical = 1 AND status != 'Completed'")
-    critical_batches_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE is_critical = 1 AND status != 'Completed'")
+    critical_batches_count = cursor.fetchone()["count"]
     
     cursor.execute("SELECT SUM(quantity_accepted) FROM batches WHERE status != 'Completed'")
-    total_pieces_in_progress = cursor.fetchone()[0] or 0
+    total_pieces_in_progress = cursor.list(cursor.fetchone().values())[0] or 0
 
     # Detailed Batch Matrix
     cursor.execute("""
@@ -331,13 +266,13 @@ def get_dashboard_overview():
             overdue_count += 1
             
         # Total stages in this route
-        cursor.execute("SELECT COUNT(*) FROM route_stages WHERE route_id = ?", (row["route_id"],))
-        total_stages = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) as count FROM route_stages WHERE route_id = %s", (row["route_id"],))
+        total_stages = cursor.fetchone()["count"]
         
         # Check if current stage is welding stage
         cursor.execute("""
         SELECT is_welding_stage FROM route_stages 
-        WHERE route_id = ? AND sequence_no = ?
+        WHERE route_id = %s AND sequence_no = %s
         """, (row["route_id"], row["current_stage_sequence"]))
         stage_meta = cursor.fetchone()
         is_welding = bool(stage_meta[0]) if stage_meta else False
@@ -411,7 +346,7 @@ def list_recent_finished_goods(limit: int = 50):
     Returns recently completed finished goods batches stored in Finished Goods Store.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     SELECT 
         b.id, b.batch_no, b.item_code, i.name as item_name, i.drawing_no,
@@ -426,14 +361,14 @@ def list_recent_finished_goods(limit: int = 50):
     JOIN process_routes r ON b.route_id = r.id
     WHERE b.status = 'Completed' OR LOWER(b.current_process) = 'finished product'
     ORDER BY COALESCE(b.actual_delivery_date, b.expected_delivery_date, b.date_started) DESC, b.id DESC
-    LIMIT ?
+    LIMIT %s
     """, (limit,))
     
     rows = cursor.fetchall()
     results = []
     for row in rows:
-        cursor.execute("SELECT COUNT(*) FROM route_stages WHERE route_id = ?", (row["route_id"],))
-        total_stages = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) as count FROM route_stages WHERE route_id = %s", (row["route_id"],))
+        total_stages = cursor.fetchone()["count"]
         item_dict = dict(row)
         item_dict["total_stages"] = total_stages
         item_dict["date_finished"] = row["actual_delivery_date"] or row["expected_delivery_date"] or row["date_started"]
@@ -449,7 +384,7 @@ def list_batches(
     critical_only: Optional[bool] = False
 ):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     query = """
     SELECT 
@@ -469,10 +404,10 @@ def list_batches(
     """
     params = []
     if item_code:
-        query += " AND b.item_code = ?"
+        query += " AND b.item_code = %s"
         params.append(item_code)
     if vendor_id:
-        query += " AND b.current_vendor_id = ?"
+        query += " AND b.current_vendor_id = %s"
         params.append(vendor_id)
     if critical_only:
         query += " AND b.is_critical = 1"
@@ -495,10 +430,10 @@ def list_batches(
 @app.post("/api/batches")
 def create_batch(payload: BatchCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # Validate item
-    cursor.execute("SELECT item_code FROM items WHERE item_code = ?", (payload.item_code,))
+    cursor.execute("SELECT item_code FROM items WHERE item_code = %s", (payload.item_code,))
     if not cursor.fetchone():
         conn.close()
         raise HTTPException(status_code=404, detail="Item not found")
@@ -507,7 +442,7 @@ def create_batch(payload: BatchCreate):
     cursor.execute("""
     SELECT sequence_no, process_name, vendor_id, is_inhouse, lead_time_days
     FROM route_stages 
-    WHERE route_id = ? 
+    WHERE route_id = %s 
     ORDER BY sequence_no ASC LIMIT 1
     """, (payload.route_id,))
     first_stage = cursor.fetchone()
@@ -529,7 +464,7 @@ def create_batch(payload: BatchCreate):
         INSERT INTO delivery_challans (
             challan_no, challan_type, date, vendor_id, item_code, 
             process_name, quantity, weight_or_length, unit, remarks
-        ) VALUES (?, 'Outward to Vendor', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, 'Outward to Vendor', %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             challan_no, today_str, first_stage["vendor_id"], payload.item_code,
             first_stage["process_name"], payload.quantity_total,
@@ -541,8 +476,8 @@ def create_batch(payload: BatchCreate):
     if payload.raw_material_code and payload.raw_material_quantity:
         cursor.execute("""
         UPDATE raw_materials
-        SET stock_quantity = MAX(0, stock_quantity - ?)
-        WHERE code = ?
+        SET stock_quantity = MAX(0, stock_quantity - %s)
+        WHERE code = %s
         """, (payload.raw_material_quantity, payload.raw_material_code))
 
     cursor.execute("""
@@ -551,7 +486,8 @@ def create_batch(payload: BatchCreate):
         current_vendor_id, is_inhouse, quantity_total, quantity_accepted, quantity_rejected,
         raw_material_code, raw_material_quantity, raw_material_unit, status,
         is_critical, date_started, date_sent_to_vendor, expected_delivery_date, challan_no, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id
     """, (
         payload.batch_no, payload.item_code, payload.route_id,
         first_stage["sequence_no"], first_stage["process_name"],
@@ -562,14 +498,14 @@ def create_batch(payload: BatchCreate):
         today_str, today_str, exp_date, challan_no, payload.notes
     ))
     
-    batch_id = cursor.lastrowid
+    batch_id = cursor.fetchone()["id"]
     
     # Record initial history
     cursor.execute("""
     INSERT INTO batch_history (
         batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
         quantity_in, quantity_out, date_in, challan_out, remarks
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         batch_id, first_stage["sequence_no"], first_stage["process_name"],
         first_stage["vendor_id"], 1 if first_stage["is_inhouse"] else 0,
@@ -583,15 +519,15 @@ def create_batch(payload: BatchCreate):
 @app.patch("/api/batches/{batch_id}/toggle-critical")
 def toggle_critical(batch_id: int):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_critical FROM batches WHERE id = ?", (batch_id,))
+    cursor = get_cursor(conn)
+    cursor.execute("SELECT is_critical FROM batches WHERE id = %s", (batch_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Batch not found")
         
     new_val = 0 if row[0] else 1
-    cursor.execute("UPDATE batches SET is_critical = ? WHERE id = ?", (new_val, batch_id))
+    cursor.execute("UPDATE batches SET is_critical = %s WHERE id = %s", (new_val, batch_id))
     conn.commit()
     conn.close()
     return {"batch_id": batch_id, "is_critical": bool(new_val)}
@@ -604,7 +540,7 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
     If partial quantity is moved, preserves the pending balance with the current vendor as a remainder batch.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     cursor.execute("""
     SELECT 
@@ -614,7 +550,7 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
         b.date_sent_to_vendor, b.expected_delivery_date, b.raw_material_code,
         b.raw_material_quantity, b.raw_material_unit, b.status, b.is_critical
     FROM batches b
-    WHERE b.id = ?
+    WHERE b.id = %s
     """, (batch_id,))
     batch = cursor.fetchone()
     if not batch:
@@ -635,12 +571,12 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
         # Partial quantity moved! Keep the pending balance at current vendor/station
         base_no = batch["batch_no"]
         candidate = f"{base_no}-R"
-        cursor.execute("SELECT id FROM batches WHERE batch_no = ?", (candidate,))
+        cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (candidate,))
         if cursor.fetchone():
             r_idx = 2
             while True:
                 candidate = f"{base_no}-R{r_idx}"
-                cursor.execute("SELECT id FROM batches WHERE batch_no = ?", (candidate,))
+                cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (candidate,))
                 if not cursor.fetchone():
                     break
                 r_idx += 1
@@ -660,7 +596,8 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
             raw_material_quantity, raw_material_unit, status, is_critical,
             date_started, date_sent_to_vendor, expected_delivery_date,
             challan_no, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id
         """, (
             remainder_batch_no, batch["item_code"], batch["route_id"],
             curr_seq, batch["current_process"], batch["current_vendor_id"],
@@ -671,14 +608,14 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
             batch["expected_delivery_date"], batch["challan_no"],
             f"Pending balance from {batch['batch_no']} ({pending_qty} pcs pending at {batch['current_process']})"
         ))
-        rem_id = cursor.lastrowid
+        rem_id = cursor.fetchone()["id"]
         
         # History for remainder batch
         cursor.execute("""
         INSERT INTO batch_history (
             batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
             quantity_in, date_in, challan_out, remarks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             rem_id, curr_seq, batch["current_process"],
             batch["current_vendor_id"], batch["is_inhouse"],
@@ -694,8 +631,8 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
 
     cursor.execute("""
     UPDATE batch_history
-    SET quantity_out = ?, quantity_rejected = ?, date_out = ?, remarks = ?
-    WHERE batch_id = ? AND stage_sequence = ?
+    SET quantity_out = %s, quantity_rejected = %s, date_out = %s, remarks = %s
+    WHERE batch_id = %s AND stage_sequence = %s
     """, (
         adv_accepted, adv_rejected,
         today_str, stage_remarks,
@@ -706,7 +643,7 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
     cursor.execute("""
     SELECT id, sequence_no, process_name, vendor_id, is_inhouse, lead_time_days, is_welding_stage
     FROM route_stages
-    WHERE route_id = ? AND sequence_no > ?
+    WHERE route_id = %s AND sequence_no > %s
     ORDER BY sequence_no ASC LIMIT 1
     """, (batch["route_id"], curr_seq))
     next_stage = cursor.fetchone()
@@ -719,19 +656,19 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
         final_seq = next_stage["sequence_no"] if next_stage else (curr_seq + 1)
         cursor.execute("""
         UPDATE batches
-        SET current_stage_sequence = ?,
+        SET current_stage_sequence = %s,
             current_process = 'Finished Product',
             current_vendor_id = NULL,
             is_inhouse = 1,
-            quantity_total = ?,
-            quantity_accepted = ?,
-            quantity_rejected = quantity_rejected + ?,
+            quantity_total = %s,
+            quantity_accepted = %s,
+            quantity_rejected = quantity_rejected + %s,
             status = 'Completed',
-            actual_delivery_date = ?,
+            actual_delivery_date = %s,
             date_sent_to_vendor = NULL,
-            expected_delivery_date = ?,
+            expected_delivery_date = %s,
             challan_no = NULL
-        WHERE id = ?
+        WHERE id = %s
         """, (
             final_seq, adv_accepted, adv_accepted, adv_rejected,
             today_str, today_str, batch_id
@@ -741,7 +678,7 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
         INSERT INTO batch_history (
             batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
             quantity_in, date_in, challan_out, remarks
-        ) VALUES (?, ?, 'Finished Product', NULL, 1, ?, ?, NULL, 'Transferred into Finished Goods Store as Completed Product')
+        ) VALUES (%s, %s, 'Finished Product', NULL, 1, %s, %s, NULL, 'Transferred into Finished Goods Store as Completed Product')
         """, (
             batch_id, final_seq, adv_accepted, today_str
         ))
@@ -773,7 +710,7 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
         INSERT INTO delivery_challans (
             challan_no, challan_type, date, vendor_id, batch_id, item_code,
             process_name, quantity, remarks
-        ) VALUES (?, 'Outward to Vendor', ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, 'Outward to Vendor', %s, %s, %s, %s, %s, %s, %s)
         """, (
             new_challan_no, today_str, next_vendor_id, batch_id, batch["item_code"],
             next_stage["process_name"], adv_accepted,
@@ -782,18 +719,18 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
 
     cursor.execute("""
     UPDATE batches
-    SET current_stage_sequence = ?,
-        current_process = ?,
-        current_vendor_id = ?,
-        is_inhouse = ?,
-        quantity_total = ?,
-        quantity_accepted = ?,
-        quantity_rejected = quantity_rejected + ?,
-        status = ?,
-        date_sent_to_vendor = ?,
-        expected_delivery_date = ?,
-        challan_no = ?
-    WHERE id = ?
+    SET current_stage_sequence = %s,
+        current_process = %s,
+        current_vendor_id = %s,
+        is_inhouse = %s,
+        quantity_total = %s,
+        quantity_accepted = %s,
+        quantity_rejected = quantity_rejected + %s,
+        status = %s,
+        date_sent_to_vendor = %s,
+        expected_delivery_date = %s,
+        challan_no = %s
+    WHERE id = %s
     """, (
         next_stage["sequence_no"], next_stage["process_name"],
         next_vendor_id, 1 if next_is_inhouse else 0,
@@ -806,7 +743,7 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
     INSERT INTO batch_history (
         batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
         quantity_in, date_in, challan_out, remarks
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         batch_id, next_stage["sequence_no"], next_stage["process_name"],
         next_vendor_id, 1 if next_is_inhouse else 0,
@@ -831,7 +768,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
     Manually moves a batch (or portion of finished product) to a specific route stage for rework.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     cursor.execute("""
     SELECT 
@@ -840,7 +777,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
         b.quantity_accepted, b.quantity_rejected, b.challan_no, b.date_started,
         b.raw_material_code, b.raw_material_quantity, b.raw_material_unit, b.status
     FROM batches b
-    WHERE b.id = ?
+    WHERE b.id = %s
     """, (batch_id,))
     batch = cursor.fetchone()
     if not batch:
@@ -855,7 +792,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
     cursor.execute("""
     SELECT id, sequence_no, process_name, vendor_id, is_inhouse, lead_time_days
     FROM route_stages
-    WHERE route_id = ? AND sequence_no = ?
+    WHERE route_id = %s AND sequence_no = %s
     """, (batch["route_id"], payload.target_stage_sequence))
     target_stage = cursor.fetchone()
     if not target_stage:
@@ -882,12 +819,12 @@ def rework_batch(batch_id: int, payload: BatchRework):
         # Create a new rework batch for the reworked quantity
         base_no = batch["batch_no"]
         rework_batch_no = f"{base_no}-RWK"
-        cursor.execute("SELECT id FROM batches WHERE batch_no = ?", (rework_batch_no,))
+        cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (rework_batch_no,))
         if cursor.fetchone():
             rwk_idx = 2
             while True:
                 rework_batch_no = f"{base_no}-RWK{rwk_idx}"
-                cursor.execute("SELECT id FROM batches WHERE batch_no = ?", (rework_batch_no,))
+                cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (rework_batch_no,))
                 if not cursor.fetchone():
                     break
                 rwk_idx += 1
@@ -896,8 +833,8 @@ def rework_batch(batch_id: int, payload: BatchRework):
         remaining_finished = batch["quantity_accepted"] - payload.quantity
         cursor.execute("""
         UPDATE batches
-        SET quantity_accepted = ?, quantity_total = ?
-        WHERE id = ?
+        SET quantity_accepted = %s, quantity_total = %s
+        WHERE id = %s
         """, (remaining_finished, remaining_finished, batch_id))
         
         # Insert rework batch
@@ -908,7 +845,8 @@ def rework_batch(batch_id: int, payload: BatchRework):
             quantity_rejected, raw_material_code, raw_material_quantity,
             raw_material_unit, status, is_critical, date_started,
             date_sent_to_vendor, expected_delivery_date, challan_no, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, 1, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, NULL, %s, %s, 1, %s, %s, %s, %s, %s)
+    RETURNING id
         """, (
             rework_batch_no, batch["item_code"], batch["route_id"],
             target_stage["sequence_no"], target_stage["process_name"],
@@ -918,7 +856,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
             rework_status, today_str, today_str, rework_exp_date, rework_dc,
             f"Rework from {batch['batch_no']}: {payload.remarks or 'Manual rework'}"
         ))
-        rework_id = cursor.lastrowid
+        rework_id = cursor.fetchone()["id"]
         
         # Add challan if external
         if not rework_is_inhouse and rework_vendor_id and rework_dc:
@@ -926,7 +864,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
             INSERT INTO delivery_challans (
                 challan_no, challan_type, date, vendor_id, batch_id, item_code,
                 process_name, quantity, remarks
-            ) VALUES (?, 'Outward for Rework', ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, 'Outward for Rework', %s, %s, %s, %s, %s, %s, %s)
             """, (
                 rework_dc, today_str, rework_vendor_id, rework_id, batch["item_code"],
                 target_stage["process_name"], payload.quantity,
@@ -938,7 +876,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
         INSERT INTO batch_history (
             batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
             quantity_in, date_in, challan_out, remarks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             rework_id, target_stage["sequence_no"], target_stage["process_name"],
             rework_vendor_id, 1 if rework_is_inhouse else 0,
@@ -960,7 +898,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
             INSERT INTO delivery_challans (
                 challan_no, challan_type, date, vendor_id, batch_id, item_code,
                 process_name, quantity, remarks
-            ) VALUES (?, 'Outward for Rework', ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, 'Outward for Rework', %s, %s, %s, %s, %s, %s, %s)
             """, (
                 rework_dc, today_str, rework_vendor_id, batch_id, batch["item_code"],
                 target_stage["process_name"], payload.quantity,
@@ -969,17 +907,17 @@ def rework_batch(batch_id: int, payload: BatchRework):
 
         cursor.execute("""
         UPDATE batches
-        SET current_stage_sequence = ?,
-            current_process = ?,
-            current_vendor_id = ?,
-            is_inhouse = ?,
-            status = ?,
-            date_sent_to_vendor = ?,
-            expected_delivery_date = ?,
-            challan_no = ?,
+        SET current_stage_sequence = %s,
+            current_process = %s,
+            current_vendor_id = %s,
+            is_inhouse = %s,
+            status = %s,
+            date_sent_to_vendor = %s,
+            expected_delivery_date = %s,
+            challan_no = %s,
             is_critical = 1,
-            notes = ?
-        WHERE id = ?
+            notes = %s
+        WHERE id = %s
         """, (
             target_stage["sequence_no"], target_stage["process_name"],
             rework_vendor_id, 1 if rework_is_inhouse else 0,
@@ -991,7 +929,7 @@ def rework_batch(batch_id: int, payload: BatchRework):
         INSERT INTO batch_history (
             batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
             quantity_in, date_in, challan_out, remarks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             batch_id, target_stage["sequence_no"], target_stage["process_name"],
             rework_vendor_id, 1 if rework_is_inhouse else 0,
@@ -1015,7 +953,7 @@ def get_batch_route_progress(batch_id: int):
     Includes past stages, current stage, and upcoming stages.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     cursor.execute("""
     SELECT 
@@ -1028,7 +966,7 @@ def get_batch_route_progress(batch_id: int):
     FROM batches b
     JOIN items i ON b.item_code = i.item_code
     JOIN process_routes r ON b.route_id = r.id
-    WHERE b.id = ?
+    WHERE b.id = %s
     """, (batch_id,))
     batch = cursor.fetchone()
     if not batch:
@@ -1042,7 +980,7 @@ def get_batch_route_progress(batch_id: int):
         rs.is_inhouse, rs.lead_time_days, rs.is_welding_stage, rs.notes
     FROM route_stages rs
     LEFT JOIN vendors v ON rs.vendor_id = v.id
-    WHERE rs.route_id = ?
+    WHERE rs.route_id = %s
     ORDER BY rs.sequence_no ASC
     """, (batch["route_id"],))
     stages = cursor.fetchall()
@@ -1055,7 +993,7 @@ def get_batch_route_progress(batch_id: int):
         bh.date_in, bh.date_out, bh.challan_in, bh.challan_out, bh.remarks
     FROM batch_history bh
     LEFT JOIN vendors v ON bh.vendor_id = v.id
-    WHERE bh.batch_id = ?
+    WHERE bh.batch_id = %s
     ORDER BY bh.stage_sequence ASC
     """, (batch_id,))
     history_map = {row["stage_sequence"]: dict(row) for row in cursor.fetchall()}
@@ -1079,7 +1017,7 @@ def get_batch_route_progress(batch_id: int):
             cursor.execute("""
             SELECT child_item_code, quantity_per_unit, unit, notes
             FROM welding_boms
-            WHERE route_stage_id = ?
+            WHERE route_stage_id = %s
             """, (s["id"],))
             welding_bom = [dict(r) for r in cursor.fetchall()]
 
@@ -1108,7 +1046,7 @@ def get_batch_route_progress(batch_id: int):
 @app.get("/api/raw-materials")
 def list_raw_materials():
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     SELECT 
         id, code, name, grade, form, unit, stock_quantity, heat_number, unit_cost, notes, created_at
@@ -1122,11 +1060,11 @@ def list_raw_materials():
 @app.post("/api/raw-materials")
 def add_raw_material(payload: RawMaterialCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     try:
         cursor.execute("""
         INSERT INTO raw_materials (code, name, grade, form, unit, stock_quantity, heat_number, unit_cost, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             payload.code, payload.name, payload.grade, payload.form, payload.unit,
             payload.stock_quantity, payload.heat_number, payload.unit_cost, payload.notes
@@ -1144,8 +1082,8 @@ def issue_raw_material(payload: RawMaterialIssue):
     Issues raw material by weight/length for a target manufactured item (e.g. CM001).
     """
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT stock_quantity, unit FROM raw_materials WHERE code = ?", (payload.raw_material_code,))
+    cursor = get_cursor(conn)
+    cursor.execute("SELECT stock_quantity, unit FROM raw_materials WHERE code = %s", (payload.raw_material_code,))
     rm = cursor.fetchone()
     if not rm:
         conn.close()
@@ -1158,8 +1096,8 @@ def issue_raw_material(payload: RawMaterialIssue):
         
     cursor.execute("""
     UPDATE raw_materials
-    SET stock_quantity = stock_quantity - ?
-    WHERE code = ?
+    SET stock_quantity = stock_quantity - %s
+    WHERE code = %s
     """, (payload.quantity_used, payload.raw_material_code))
     
     conn.commit()
@@ -1175,7 +1113,7 @@ def issue_raw_material(payload: RawMaterialIssue):
 @app.get("/api/items")
 def list_items():
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     SELECT 
         i.id, i.item_code, i.name, i.drawing_no, i.revision, i.material_code,
@@ -1197,11 +1135,11 @@ def list_items():
 @app.post("/api/items")
 def create_item(payload: ItemCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     try:
         cursor.execute("""
         INSERT INTO items (item_code, name, drawing_no, revision, material_code, raw_material_name, weight, default_quantity, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             payload.item_code, payload.name, payload.drawing_no, payload.revision,
             payload.material_code, payload.raw_material_name, payload.weight or 0.0, payload.default_quantity, payload.notes
@@ -1219,11 +1157,11 @@ def get_item_routes(item_code: str):
     Requirement 2: Multiple process routes for a single item.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     SELECT id, item_code, route_name, is_default, description, created_at
     FROM process_routes
-    WHERE item_code = ?
+    WHERE item_code = %s
     ORDER BY is_default DESC, id ASC
     """, (item_code,))
     routes = []
@@ -1234,7 +1172,7 @@ def get_item_routes(item_code: str):
             rs.is_inhouse, rs.lead_time_days, rs.is_welding_stage, rs.notes
         FROM route_stages rs
         LEFT JOIN vendors v ON rs.vendor_id = v.id
-        WHERE rs.route_id = ?
+        WHERE rs.route_id = %s
         ORDER BY rs.sequence_no ASC
         """, (r["id"],))
         stages = [dict(s) for s in cursor.fetchall()]
@@ -1248,20 +1186,21 @@ def get_item_routes(item_code: str):
 @app.post("/api/items/{item_code}/routes")
 def create_item_route(item_code: str, payload: ProcessRouteCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     cursor.execute("""
     INSERT INTO process_routes (item_code, route_name, is_default, description)
-    VALUES (?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s)
+    RETURNING id
     """, (item_code, payload.route_name, 1 if payload.is_default else 0, payload.description))
-    route_id = cursor.lastrowid
+    route_id = cursor.fetchone()["id"]
     
     for s in payload.stages:
         cursor.execute("""
         INSERT INTO route_stages (
             route_id, sequence_no, process_name, vendor_id, is_inhouse,
             lead_time_days, is_welding_stage, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             route_id, s.sequence_no, s.process_name, s.vendor_id,
             1 if s.is_inhouse else 0, s.lead_time_days,
@@ -1275,10 +1214,10 @@ def create_item_route(item_code: str, payload: ProcessRouteCreate):
 @app.delete("/api/items/{item_code}")
 def delete_item(item_code: str):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # Check if item exists
-    cursor.execute("SELECT id, item_code, name FROM items WHERE item_code = ?", (item_code,))
+    cursor.execute("SELECT id, item_code, name FROM items WHERE item_code = %s", (item_code,))
     item = cursor.fetchone()
     if not item:
         conn.close()
@@ -1286,10 +1225,10 @@ def delete_item(item_code: str):
         
     # Check for active production batches
     cursor.execute("""
-    SELECT COUNT(*) FROM batches 
-    WHERE item_code = ? AND status != 'Completed'
+    SELECT COUNT(*) as count FROM batches 
+    WHERE item_code = %s AND status != 'Completed'
     """, (item_code,))
-    active_batches_count = cursor.fetchone()[0]
+    active_batches_count = cursor.fetchone()["count"]
     
     if active_batches_count > 0:
         conn.close()
@@ -1299,13 +1238,13 @@ def delete_item(item_code: str):
         )
 
     # 1. Clean up welding BOMs where this item is child or parent or attached to this item's stages
-    cursor.execute("DELETE FROM welding_boms WHERE child_item_code = ? OR parent_item_code = ?", (item_code, item_code))
+    cursor.execute("DELETE FROM welding_boms WHERE child_item_code = %s OR parent_item_code = %s", (item_code, item_code))
     cursor.execute("""
     DELETE FROM welding_boms 
     WHERE route_stage_id IN (
         SELECT rs.id FROM route_stages rs
         JOIN process_routes pr ON rs.route_id = pr.id
-        WHERE pr.item_code = ?
+        WHERE pr.item_code = %s
     )
     """, (item_code,))
 
@@ -1313,26 +1252,26 @@ def delete_item(item_code: str):
     cursor.execute("""
     DELETE FROM route_stages 
     WHERE route_id IN (
-        SELECT id FROM process_routes WHERE item_code = ?
+        SELECT id FROM process_routes WHERE item_code = %s
     )
     """, (item_code,))
 
     # 3. Clean up process routes
-    cursor.execute("DELETE FROM process_routes WHERE item_code = ?", (item_code,))
+    cursor.execute("DELETE FROM process_routes WHERE item_code = %s", (item_code,))
 
     # 4. Clean up any completed batches & history & followups
     cursor.execute("""
     DELETE FROM vendor_followups 
-    WHERE batch_id IN (SELECT id FROM batches WHERE item_code = ?)
+    WHERE batch_id IN (SELECT id FROM batches WHERE item_code = %s)
     """, (item_code,))
     cursor.execute("""
     DELETE FROM batch_history 
-    WHERE batch_id IN (SELECT id FROM batches WHERE item_code = ?)
+    WHERE batch_id IN (SELECT id FROM batches WHERE item_code = %s)
     """, (item_code,))
-    cursor.execute("DELETE FROM batches WHERE item_code = ?", (item_code,))
+    cursor.execute("DELETE FROM batches WHERE item_code = %s", (item_code,))
 
     # 5. Delete the item record itself
-    cursor.execute("DELETE FROM items WHERE item_code = ?", (item_code,))
+    cursor.execute("DELETE FROM items WHERE item_code = %s", (item_code,))
 
     conn.commit()
     conn.close()
@@ -1346,10 +1285,10 @@ def update_item(item_code: str, payload: ItemUpdate):
     Guarantees that the final stage remains strictly 'Finished Product' for assembly readiness.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # 1. Verify item exists
-    cursor.execute("SELECT id, item_code, name FROM items WHERE item_code = ?", (item_code,))
+    cursor.execute("SELECT id, item_code, name FROM items WHERE item_code = %s", (item_code,))
     item = cursor.fetchone()
     if not item:
         conn.close()
@@ -1359,39 +1298,39 @@ def update_item(item_code: str, payload: ItemUpdate):
     update_fields = []
     params = []
     if payload.name is not None:
-        update_fields.append("name = ?")
+        update_fields.append("name = %s")
         params.append(payload.name)
     if payload.drawing_no is not None:
-        update_fields.append("drawing_no = ?")
+        update_fields.append("drawing_no = %s")
         params.append(payload.drawing_no)
     if payload.revision is not None:
-        update_fields.append("revision = ?")
+        update_fields.append("revision = %s")
         params.append(payload.revision)
     if payload.material_code is not None:
-        update_fields.append("material_code = ?")
+        update_fields.append("material_code = %s")
         params.append(payload.material_code)
     if payload.raw_material_name is not None:
-        update_fields.append("raw_material_name = ?")
+        update_fields.append("raw_material_name = %s")
         params.append(payload.raw_material_name)
     if payload.weight is not None:
-        update_fields.append("weight = ?")
+        update_fields.append("weight = %s")
         params.append(payload.weight)
     if payload.default_quantity is not None:
-        update_fields.append("default_quantity = ?")
+        update_fields.append("default_quantity = %s")
         params.append(payload.default_quantity)
     if payload.notes is not None:
-        update_fields.append("notes = ?")
+        update_fields.append("notes = %s")
         params.append(payload.notes)
         
     if update_fields:
         params.append(item_code)
-        cursor.execute(f"UPDATE items SET {', '.join(update_fields)} WHERE item_code = ?", params)
+        cursor.execute(f"UPDATE items SET {', '.join(update_fields)} WHERE item_code = %s", params)
         
     # 3. Update route and stages if stages provided
     if payload.stages is not None:
         cursor.execute("""
         SELECT id, route_name FROM process_routes 
-        WHERE item_code = ? 
+        WHERE item_code = %s 
         ORDER BY is_default DESC, id ASC LIMIT 1
         """, (item_code,))
         route = cursor.fetchone()
@@ -1399,21 +1338,22 @@ def update_item(item_code: str, payload: ItemUpdate):
         if route:
             route_id = route["id"]
             if payload.route_name:
-                cursor.execute("UPDATE process_routes SET route_name = ? WHERE id = ?", (payload.route_name, route_id))
+                cursor.execute("UPDATE process_routes SET route_name = %s WHERE id = %s", (payload.route_name, route_id))
         else:
             route_name = payload.route_name or f"{item_code} Process Route"
             cursor.execute("""
             INSERT INTO process_routes (item_code, route_name, is_default, description)
-            VALUES (?, ?, 1, ?)
+            VALUES (%s, %s, 1, %s)
+    RETURNING id
             """, (item_code, route_name, f"Process route for {item_code}"))
-            route_id = cursor.lastrowid
+            route_id = cursor.fetchone()["id"]
 
         # Clean old welding BOMs linked to these stages
         cursor.execute("""
         DELETE FROM welding_boms 
-        WHERE route_stage_id IN (SELECT id FROM route_stages WHERE route_id = ?)
+        WHERE route_stage_id IN (SELECT id FROM route_stages WHERE route_id = %s)
         """, (route_id,))
-        cursor.execute("DELETE FROM route_stages WHERE route_id = ?", (route_id,))
+        cursor.execute("DELETE FROM route_stages WHERE route_id = %s", (route_id,))
         
         # Enforce strictly: Final stage MUST be "Finished Product" (in-house, ready for production assembly)
         stages_to_insert = list(payload.stages)
@@ -1441,19 +1381,20 @@ def update_item(item_code: str, payload: ItemUpdate):
             INSERT INTO route_stages (
                 route_id, sequence_no, process_name, vendor_id, is_inhouse,
                 lead_time_days, is_welding_stage, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id
             """, (
                 route_id, idx, stage.process_name, stage.vendor_id,
                 1 if stage.is_inhouse else 0, stage.lead_time_days,
                 1 if stage.is_welding_stage else 0, stage.notes
             ))
-            stage_id = cursor.lastrowid
+            stage_id = cursor.fetchone()["id"]
             
             if stage.is_welding_stage and stage.welding_components:
                 for comp in stage.welding_components:
                     cursor.execute("""
                     INSERT INTO welding_boms (route_stage_id, parent_item_code, child_item_code, quantity_per_unit, unit)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s)
                     """, (
                         stage_id, item_code, comp.get("child_item_code"),
                         float(comp.get("quantity_per_unit", 1.0)), comp.get("unit", "pcs")
@@ -1466,11 +1407,11 @@ def update_item(item_code: str, payload: ItemUpdate):
             new_status = 'In Process' if stage.is_inhouse else 'With Vendor'
             cursor.execute("""
             UPDATE batches 
-            SET current_vendor_id = ?,
-                is_inhouse = ?,
-                current_process = ?,
-                status = CASE WHEN status != 'Completed' THEN ? ELSE status END
-            WHERE item_code = ? AND current_stage_sequence = ? AND status != 'Completed'
+            SET current_vendor_id = %s,
+                is_inhouse = %s,
+                current_process = %s,
+                status = CASE WHEN status != 'Completed' THEN %s ELSE status END
+            WHERE item_code = %s AND current_stage_sequence = %s AND status != 'Completed'
             """, (v_id, inhouse_val, stage.process_name, new_status, item_code, idx))
 
     conn.commit()
@@ -1486,7 +1427,7 @@ def get_welding_bom(route_stage_id: int):
     Requirement 8: Multi-items with variable quantities for welding stage.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     SELECT 
         wb.id, wb.route_stage_id, wb.parent_item_code, wb.child_item_code,
@@ -1494,7 +1435,7 @@ def get_welding_bom(route_stage_id: int):
         wb.quantity_per_unit, wb.unit, wb.notes
     FROM welding_boms wb
     JOIN items i ON wb.child_item_code = i.item_code
-    WHERE wb.route_stage_id = ?
+    WHERE wb.route_stage_id = %s
     """, (route_stage_id,))
     components = [dict(row) for row in cursor.fetchall()]
     conn.close()
@@ -1503,16 +1444,17 @@ def get_welding_bom(route_stage_id: int):
 @app.post("/api/welding-boms")
 def add_welding_bom_item(payload: WeldingBOMItemCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     INSERT INTO welding_boms (route_stage_id, parent_item_code, child_item_code, quantity_per_unit, unit, notes)
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    RETURNING id
     """, (
         payload.route_stage_id, payload.parent_item_code, payload.child_item_code,
         payload.quantity_per_unit, payload.unit, payload.notes
     ))
     conn.commit()
-    bom_id = cursor.lastrowid
+    bom_id = cursor.fetchone()["id"]
     conn.close()
     return {"message": "Component added to Welding BOM", "id": bom_id}
 
@@ -1523,10 +1465,10 @@ def check_welding_component_readiness(batch_id: int):
     before the welding process can proceed.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     SELECT b.id, b.item_code, b.route_id, b.current_stage_sequence, b.quantity_total
-    FROM batches b WHERE b.id = ?
+    FROM batches b WHERE b.id = %s
     """, (batch_id,))
     batch = cursor.fetchone()
     if not batch:
@@ -1536,7 +1478,7 @@ def check_welding_component_readiness(batch_id: int):
     # Get welding stage id
     cursor.execute("""
     SELECT id FROM route_stages
-    WHERE route_id = ? AND is_welding_stage = 1
+    WHERE route_id = %s AND is_welding_stage = 1
     """, (batch["route_id"],))
     stage = cursor.fetchone()
     if not stage:
@@ -1548,7 +1490,7 @@ def check_welding_component_readiness(batch_id: int):
         wb.child_item_code, i.name as child_name, wb.quantity_per_unit, wb.unit
     FROM welding_boms wb
     JOIN items i ON wb.child_item_code = i.item_code
-    WHERE wb.route_stage_id = ?
+    WHERE wb.route_stage_id = %s
     """, (stage["id"],))
     
     components = []
@@ -1559,9 +1501,9 @@ def check_welding_component_readiness(batch_id: int):
         cursor.execute("""
         SELECT COALESCE(SUM(quantity_accepted), 0)
         FROM batches
-        WHERE item_code = ? AND (status = 'Completed' OR current_process = 'Finished Product')
+        WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (row["child_item_code"],))
-        available_qty = cursor.fetchone()[0]
+        available_qty = cursor.list(cursor.fetchone().values())[0]
         
         is_ready = available_qty >= req_qty
         if not is_ready:
@@ -1591,7 +1533,7 @@ def check_welding_component_readiness(batch_id: int):
 @app.get("/api/vendors")
 def list_vendors():
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     SELECT 
         v.id, v.code, v.name, v.contact_person, v.phone, v.email, v.address,
@@ -1610,19 +1552,20 @@ def list_vendors():
 @app.post("/api/vendors")
 def create_vendor(payload: VendorCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     v_type = payload.vendor_type if payload.vendor_type in ['Trip', 'Local'] else 'Local'
     try:
         cursor.execute("""
         INSERT INTO vendors (code, name, contact_person, phone, email, address, processes_offered, default_lead_time_days, rating, notes, vendor_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id
         """, (
             payload.code, payload.name, payload.contact_person, payload.phone,
             payload.email, payload.address, payload.processes_offered,
             payload.default_lead_time_days, payload.rating, payload.notes,
             v_type
         ))
-        vendor_id = cursor.lastrowid
+        vendor_id = cursor.fetchone()["id"]
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -1633,8 +1576,8 @@ def create_vendor(payload: VendorCreate):
 @app.put("/api/vendors/{vendor_id}")
 def update_vendor(vendor_id: int, payload: VendorCreate):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM vendors WHERE id = ?", (vendor_id,))
+    cursor = get_cursor(conn)
+    cursor.execute("SELECT id FROM vendors WHERE id = %s", (vendor_id,))
     if not cursor.fetchone():
         conn.close()
         raise HTTPException(status_code=404, detail="Vendor not found")
@@ -1642,17 +1585,17 @@ def update_vendor(vendor_id: int, payload: VendorCreate):
     v_type = payload.vendor_type if payload.vendor_type in ['Trip', 'Local'] else 'Local'
     cursor.execute("""
     UPDATE vendors
-    SET name = ?,
-        contact_person = ?,
-        phone = ?,
-        email = ?,
-        address = ?,
-        processes_offered = ?,
-        default_lead_time_days = ?,
-        rating = ?,
-        notes = ?,
-        vendor_type = ?
-    WHERE id = ?
+    SET name = %s,
+        contact_person = %s,
+        phone = %s,
+        email = %s,
+        address = %s,
+        processes_offered = %s,
+        default_lead_time_days = %s,
+        rating = %s,
+        notes = %s,
+        vendor_type = %s
+    WHERE id = %s
     """, (
         payload.name, payload.contact_person, payload.phone,
         payload.email, payload.address, payload.processes_offered,
@@ -1667,8 +1610,8 @@ def update_vendor(vendor_id: int, payload: VendorCreate):
 @app.patch("/api/vendors/{vendor_id}/toggle-type")
 def toggle_vendor_type(vendor_id: int):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, vendor_type FROM vendors WHERE id = ?", (vendor_id,))
+    cursor = get_cursor(conn)
+    cursor.execute("SELECT id, vendor_type FROM vendors WHERE id = %s", (vendor_id,))
     vendor = cursor.fetchone()
     if not vendor:
         conn.close()
@@ -1676,7 +1619,7 @@ def toggle_vendor_type(vendor_id: int):
     
     current_type = vendor["vendor_type"] or "Local"
     new_type = "Trip" if current_type == "Local" else "Local"
-    cursor.execute("UPDATE vendors SET vendor_type = ? WHERE id = ?", (new_type, vendor_id))
+    cursor.execute("UPDATE vendors SET vendor_type = %s WHERE id = %s", (new_type, vendor_id))
     conn.commit()
     conn.close()
     return {"message": f"Vendor type updated to {new_type}", "vendor_id": vendor_id, "vendor_type": new_type}
@@ -1684,9 +1627,9 @@ def toggle_vendor_type(vendor_id: int):
 @app.delete("/api/vendors/{vendor_id}")
 def delete_vendor(vendor_id: int):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
-    cursor.execute("SELECT name FROM vendors WHERE id = ?", (vendor_id,))
+    cursor.execute("SELECT name FROM vendors WHERE id = %s", (vendor_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
@@ -1695,10 +1638,10 @@ def delete_vendor(vendor_id: int):
     
     # Check if vendor has active batches
     cursor.execute("""
-    SELECT COUNT(*) FROM batches 
-    WHERE current_vendor_id = ? AND status = 'With Vendor'
+    SELECT COUNT(*) as count FROM batches 
+    WHERE current_vendor_id = %s AND status = 'With Vendor'
     """, (vendor_id,))
-    active_count = cursor.fetchone()[0]
+    active_count = cursor.fetchone()["count"]
     
     if active_count > 0:
         conn.close()
@@ -1708,9 +1651,9 @@ def delete_vendor(vendor_id: int):
         )
         
     # Unlink from route stages
-    cursor.execute("UPDATE route_stages SET vendor_id = NULL, is_inhouse = 1 WHERE vendor_id = ?", (vendor_id,))
+    cursor.execute("UPDATE route_stages SET vendor_id = NULL, is_inhouse = 1 WHERE vendor_id = %s", (vendor_id,))
     # Delete vendor
-    cursor.execute("DELETE FROM vendors WHERE id = ?", (vendor_id,))
+    cursor.execute("DELETE FROM vendors WHERE id = %s", (vendor_id,))
     conn.commit()
     conn.close()
     return {"message": f"Vendor '{vendor_name}' removed successfully", "vendor_id": vendor_id}
@@ -1722,7 +1665,7 @@ def delete_vendor(vendor_id: int):
 @app.get("/api/followups")
 def list_followups(vendor_id: Optional[int] = None, batch_id: Optional[int] = None):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     query = """
     SELECT 
         f.id, f.batch_id, b.batch_no, b.item_code, COALESCE(i.name, b.item_code) as item_name,
@@ -1738,10 +1681,10 @@ def list_followups(vendor_id: Optional[int] = None, batch_id: Optional[int] = No
     """
     params = []
     if vendor_id:
-        query += " AND f.vendor_id = ?"
+        query += " AND f.vendor_id = %s"
         params.append(vendor_id)
     if batch_id:
-        query += " AND f.batch_id = ?"
+        query += " AND f.batch_id = %s"
         params.append(batch_id)
         
     query += " ORDER BY f.date_contacted DESC, f.id DESC"
@@ -1753,14 +1696,14 @@ def list_followups(vendor_id: Optional[int] = None, batch_id: Optional[int] = No
 @app.post("/api/followups")
 def add_followup(payload: VendorFollowUpCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     today_str = datetime.now().strftime("%Y-%m-%d")
     
     cursor.execute("""
     INSERT INTO vendor_followups (
         batch_id, vendor_id, challan_no, date_contacted, contact_person,
         method, vendor_status_update, promised_date, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         payload.batch_id, payload.vendor_id, payload.challan_no,
         today_str, payload.contact_person, payload.method,
@@ -1771,8 +1714,8 @@ def add_followup(payload: VendorFollowUpCreate):
     if payload.promised_date:
         cursor.execute("""
         UPDATE batches
-        SET expected_delivery_date = ?
-        WHERE id = ?
+        SET expected_delivery_date = %s
+        WHERE id = %s
         """, (payload.promised_date, payload.batch_id))
         
     conn.commit()
@@ -1785,7 +1728,7 @@ def add_followup(payload: VendorFollowUpCreate):
 @app.get("/api/challans")
 def list_challans(challan_type: Optional[str] = None):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     query = """
     SELECT 
         dc.id, dc.challan_no, dc.challan_type, dc.date,
@@ -1802,7 +1745,7 @@ def list_challans(challan_type: Optional[str] = None):
     """
     params = []
     if challan_type:
-        query += " AND dc.challan_type = ?"
+        query += " AND dc.challan_type = %s"
         params.append(challan_type)
         
     query += " ORDER BY dc.date DESC, dc.id DESC"
@@ -1814,12 +1757,12 @@ def list_challans(challan_type: Optional[str] = None):
 @app.post("/api/challans")
 def create_challan(payload: ChallanCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     INSERT INTO delivery_challans (
         challan_no, challan_type, date, vendor_id, batch_id, item_code,
         process_name, quantity, weight_or_length, unit, transporter, vehicle_no, remarks
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         payload.challan_no, payload.challan_type, payload.date,
         payload.vendor_id, payload.batch_id, payload.item_code,
@@ -1840,7 +1783,7 @@ def get_vendor_stocks():
     Shows item code, item name, drawing no, quantity, process, sent date, due date, and critical status.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     cursor.execute("""
     SELECT id, code, name, contact_person, phone, email, address, processes_offered, default_lead_time_days, rating,
@@ -1869,7 +1812,7 @@ def get_vendor_stocks():
             JOIN process_routes pr ON rs.route_id = pr.id
             WHERE pr.is_default = 1
         ) d_stage ON d_stage.item_code = b.item_code AND d_stage.sequence_no = b.current_stage_sequence
-        WHERE (b.current_vendor_id = ? OR (b.current_vendor_id IS NULL AND b.is_inhouse = 0 AND d_stage.vendor_id = ?))
+        WHERE (b.current_vendor_id = %s OR (b.current_vendor_id IS NULL AND b.is_inhouse = 0 AND d_stage.vendor_id = %s))
           AND b.status = 'With Vendor'
           AND b.quantity_accepted > 0
         ORDER BY b.is_critical DESC, b.expected_delivery_date ASC
@@ -1943,7 +1886,7 @@ def get_items_stock_by_stage():
     (e.g., In-House Cutting, Vendor Forging, Machining, Finished Goods).
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # 1. Fetch all items
     cursor.execute("""
@@ -1969,7 +1912,7 @@ def get_items_stock_by_stage():
         # Get active default route for this item
         cursor.execute("""
         SELECT id, route_name FROM process_routes 
-        WHERE item_code = ? 
+        WHERE item_code = %s 
         ORDER BY is_default DESC, id ASC LIMIT 1
         """, (code,))
         route = cursor.fetchone()
@@ -1982,7 +1925,7 @@ def get_items_stock_by_stage():
                 rs.is_inhouse, rs.lead_time_days, rs.is_welding_stage, rs.notes
             FROM route_stages rs
             LEFT JOIN vendors v ON rs.vendor_id = v.id
-            WHERE rs.route_id = ?
+            WHERE rs.route_id = %s
             ORDER BY rs.sequence_no ASC
             """, (route["id"],))
             stages = [dict(s) for s in cursor.fetchall()]
@@ -1997,7 +1940,7 @@ def get_items_stock_by_stage():
             b.expected_delivery_date, b.challan_no, b.notes
         FROM batches b
         LEFT JOIN vendors v ON b.current_vendor_id = v.id
-        WHERE b.item_code = ?
+        WHERE b.item_code = %s
         ORDER BY b.is_critical DESC, b.current_stage_sequence ASC, b.id ASC
         """, (code,))
         all_batches = cursor.fetchall()
@@ -2112,7 +2055,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
         raise HTTPException(status_code=400, detail="Adjustment type must be 'add' or 'deduct'")
 
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
 
     previous_stock = 0.0
     new_stock = 0.0
@@ -2123,7 +2066,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
             conn.close()
             raise HTTPException(status_code=400, detail="Item code is required for Finished Goods amendment")
 
-        cursor.execute("SELECT item_code, name FROM items WHERE item_code = ?", (payload.item_code,))
+        cursor.execute("SELECT item_code, name FROM items WHERE item_code = %s", (payload.item_code,))
         item = cursor.fetchone()
         if not item:
             conn.close()
@@ -2131,16 +2074,16 @@ def create_stock_amendment(payload: StockAmendmentCreate):
 
         cursor.execute("""
         SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-        WHERE item_code = ? AND (status = 'Completed' OR current_process = 'Finished Product')
+        WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (payload.item_code,))
-        previous_stock = float(cursor.fetchone()[0] or 0)
+        previous_stock = float(cursor.list(cursor.fetchone().values())[0] or 0)
 
         if payload.adjustment_type == "add":
             new_stock = previous_stock + payload.quantity
 
             # Find default route for this item
             cursor.execute("""
-            SELECT id FROM process_routes WHERE item_code = ? ORDER BY is_default DESC, id ASC LIMIT 1
+            SELECT id FROM process_routes WHERE item_code = %s ORDER BY is_default DESC, id ASC LIMIT 1
             """, (payload.item_code,))
             route = cursor.fetchone()
             route_id = route["id"] if route else 1
@@ -2148,7 +2091,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
             # Find sequence number of Finished Product stage
             cursor.execute("""
             SELECT sequence_no FROM route_stages 
-            WHERE route_id = ? AND LOWER(TRIM(process_name)) = 'finished product'
+            WHERE route_id = %s AND LOWER(TRIM(process_name)) = 'finished product'
             ORDER BY sequence_no DESC LIMIT 1
             """, (route_id,))
             stg = cursor.fetchone()
@@ -2161,7 +2104,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
                 batch_no, item_code, route_id, current_stage_sequence, current_process,
                 is_inhouse, quantity_total, quantity_accepted, quantity_rejected,
                 status, is_critical, date_started, notes
-            ) VALUES (?, ?, ?, ?, 'Finished Product', 1, ?, ?, 0, 'Completed', 0, ?, ?)
+            ) VALUES (%s, %s, %s, %s, 'Finished Product', 1, %s, %s, 0, 'Completed', 0, %s, %s)
             """, (
                 batch_no, payload.item_code, route_id, stage_seq,
                 int(payload.quantity), int(payload.quantity), today_str,
@@ -2180,7 +2123,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
 
             cursor.execute("""
             SELECT id, quantity_accepted FROM batches 
-            WHERE item_code = ? AND (status = 'Completed' OR current_process = 'Finished Product') AND quantity_accepted > 0
+            WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product') AND quantity_accepted > 0
             ORDER BY id DESC
             """, (payload.item_code,))
             batches_to_decrement = cursor.fetchall()
@@ -2189,10 +2132,10 @@ def create_stock_amendment(payload: StockAmendmentCreate):
                 b_id = b["id"]
                 b_qty = b["quantity_accepted"]
                 if b_qty <= remaining_to_deduct:
-                    cursor.execute("UPDATE batches SET quantity_accepted = 0 WHERE id = ?", (b_id,))
+                    cursor.execute("UPDATE batches SET quantity_accepted = 0 WHERE id = %s", (b_id,))
                     remaining_to_deduct -= b_qty
                 else:
-                    cursor.execute("UPDATE batches SET quantity_accepted = quantity_accepted - ? WHERE id = ?", (remaining_to_deduct, b_id))
+                    cursor.execute("UPDATE batches SET quantity_accepted = quantity_accepted - %s WHERE id = %s", (remaining_to_deduct, b_id))
                     remaining_to_deduct = 0
                 if remaining_to_deduct <= 0:
                     break
@@ -2209,7 +2152,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
         cursor.execute("""
         SELECT id, batch_no, quantity_accepted, quantity_total, current_process 
         FROM batches 
-        WHERE item_code = ? AND current_stage_sequence = ? AND status != 'Completed' AND current_process != 'Finished Product'
+        WHERE item_code = %s AND current_stage_sequence = %s AND status != 'Completed' AND current_process != 'Finished Product'
         ORDER BY id DESC
         """, (payload.item_code, payload.stage_sequence))
         wip_batches = cursor.fetchall()
@@ -2219,7 +2162,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
         SELECT rs.route_id, rs.sequence_no, rs.process_name, rs.vendor_id, rs.is_inhouse, rs.lead_time_days
         FROM route_stages rs
         JOIN process_routes pr ON rs.route_id = pr.id
-        WHERE pr.item_code = ? AND rs.sequence_no = ?
+        WHERE pr.item_code = %s AND rs.sequence_no = %s
         ORDER BY pr.is_default DESC, pr.id ASC
         LIMIT 1
         """, (payload.item_code, payload.stage_sequence))
@@ -2243,12 +2186,12 @@ def create_stock_amendment(payload: StockAmendmentCreate):
                 latest_id = wip_batches[0]["id"]
                 cursor.execute("""
                 UPDATE batches 
-                SET quantity_accepted = quantity_accepted + ?,
-                    quantity_total = quantity_total + ?,
-                    current_vendor_id = COALESCE(?, current_vendor_id),
-                    is_inhouse = CASE WHEN ? IS NOT NULL THEN 0 ELSE is_inhouse END,
-                    status = CASE WHEN ? IS NOT NULL THEN 'With Vendor' ELSE status END
-                WHERE id = ?
+                SET quantity_accepted = quantity_accepted + %s,
+                    quantity_total = quantity_total + %s,
+                    current_vendor_id = COALESCE(%s, current_vendor_id),
+                    is_inhouse = CASE WHEN %s IS NOT NULL THEN 0 ELSE is_inhouse END,
+                    status = CASE WHEN %s IS NOT NULL THEN 'With Vendor' ELSE status END
+                WHERE id = %s
                 """, (int(payload.quantity), int(payload.quantity), target_vendor_id, target_vendor_id, target_vendor_id, latest_id))
             else:
                 # Create a new WIP batch for this stage
@@ -2262,7 +2205,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
                     batch_no, item_code, route_id, current_stage_sequence, current_process,
                     current_vendor_id, is_inhouse, quantity_total, quantity_accepted, quantity_rejected,
                     status, is_critical, date_started, date_sent_to_vendor, expected_delivery_date, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, 0, %s, %s, %s, %s)
                 """, (
                     batch_no, payload.item_code, route_id, payload.stage_sequence, proc_name,
                     target_vendor_id, 1 if is_inhouse else 0, int(payload.quantity), int(payload.quantity),
@@ -2285,10 +2228,10 @@ def create_stock_amendment(payload: StockAmendmentCreate):
                 b_id = b["id"]
                 b_qty = b["quantity_accepted"]
                 if b_qty <= remaining:
-                    cursor.execute("UPDATE batches SET quantity_accepted = 0 WHERE id = ?", (b_id,))
+                    cursor.execute("UPDATE batches SET quantity_accepted = 0 WHERE id = %s", (b_id,))
                     remaining -= b_qty
                 else:
-                    cursor.execute("UPDATE batches SET quantity_accepted = quantity_accepted - ? WHERE id = ?", (remaining, b_id))
+                    cursor.execute("UPDATE batches SET quantity_accepted = quantity_accepted - %s WHERE id = %s", (remaining, b_id))
                     remaining = 0
                 if remaining <= 0:
                     break
@@ -2299,7 +2242,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
             conn.close()
             raise HTTPException(status_code=400, detail="Raw material code is required for Raw Material amendment")
 
-        cursor.execute("SELECT code, name, stock_quantity, unit FROM raw_materials WHERE code = ?", (payload.raw_material_code,))
+        cursor.execute("SELECT code, name, stock_quantity, unit FROM raw_materials WHERE code = %s", (payload.raw_material_code,))
         rm = cursor.fetchone()
         if not rm:
             conn.close()
@@ -2310,7 +2253,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
 
         if payload.adjustment_type == "add":
             new_stock = previous_stock + payload.quantity
-            cursor.execute("UPDATE raw_materials SET stock_quantity = stock_quantity + ? WHERE code = ?", (payload.quantity, payload.raw_material_code))
+            cursor.execute("UPDATE raw_materials SET stock_quantity = stock_quantity + %s WHERE code = %s", (payload.quantity, payload.raw_material_code))
         else:  # deduct
             if payload.quantity > previous_stock:
                 conn.close()
@@ -2319,7 +2262,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
                     detail=f"Cannot deduct {payload.quantity} {unit}: current raw material stock is only {previous_stock} {unit}."
                 )
             new_stock = previous_stock - payload.quantity
-            cursor.execute("UPDATE raw_materials SET stock_quantity = stock_quantity - ? WHERE code = ?", (payload.quantity, payload.raw_material_code))
+            cursor.execute("UPDATE raw_materials SET stock_quantity = stock_quantity - %s WHERE code = %s", (payload.quantity, payload.raw_material_code))
 
     else:
         conn.close()
@@ -2332,7 +2275,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
         amendment_no, target_type, item_code, stage_sequence, stage_name,
         raw_material_code, adjustment_type, quantity, previous_stock,
         new_stock, reason, remarks
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         amd_no, payload.target_type, payload.item_code, payload.stage_sequence,
         payload.stage_name, payload.raw_material_code, payload.adjustment_type,
@@ -2364,19 +2307,19 @@ def list_stock_amendments(
     Returns audit trail of all manual stock amendments.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     query = "SELECT * FROM stock_amendments WHERE 1=1"
     params = []
     if item_code:
-        query += " AND item_code = ?"
+        query += " AND item_code = %s"
         params.append(item_code)
     if raw_material_code:
-        query += " AND raw_material_code = ?"
+        query += " AND raw_material_code = %s"
         params.append(raw_material_code)
     if target_type:
-        query += " AND target_type = ?"
+        query += " AND target_type = %s"
         params.append(target_type)
-    query += " ORDER BY id DESC LIMIT ?"
+    query += " ORDER BY id DESC LIMIT %s"
     params.append(limit)
 
     cursor.execute(query, params)
@@ -2394,7 +2337,7 @@ def get_daily_tasks():
     - Recent vendor communication logs
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     today_str = datetime.now().strftime("%Y-%m-%d")
     
     # 1. Vendor overdue & due today items
@@ -2502,7 +2445,7 @@ def get_logistics_plan(target_date: Optional[str] = None):
     2. Local Plan (Local industrial cluster vendors for daily local rounds)
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     today = datetime.now()
     today_str = today.strftime("%Y-%m-%d")
@@ -2644,13 +2587,13 @@ def create_item_with_route(payload: ItemWithRouteCreate):
     Supports individual process routes per item, vendor assignments, lead times, and welding BOMs.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # 1. Insert Item
     try:
         cursor.execute("""
         INSERT INTO items (item_code, name, drawing_no, revision, material_code, raw_material_name, weight, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (payload.item_code, payload.name, payload.drawing_no, payload.revision, payload.material_code, payload.raw_material_name, payload.weight or 0.0, payload.notes))
     except sqlite3.IntegrityError:
         conn.close()
@@ -2660,9 +2603,10 @@ def create_item_with_route(payload: ItemWithRouteCreate):
     route_name = payload.route_name or f"{payload.item_code} Process Route"
     cursor.execute("""
     INSERT INTO process_routes (item_code, route_name, is_default, description)
-    VALUES (?, ?, 1, ?)
+    VALUES (%s, %s, 1, %s)
+    RETURNING id
     """, (payload.item_code, route_name, f"Custom sequential route for {payload.item_code}"))
-    route_id = cursor.lastrowid
+    route_id = cursor.fetchone()["id"]
     
     # 3. Insert Route Stages - Guarantee final stage is strictly Finished Product for production assembly
     stages_to_insert = list(payload.stages)
@@ -2691,20 +2635,21 @@ def create_item_with_route(payload: ItemWithRouteCreate):
         INSERT INTO route_stages (
             route_id, sequence_no, process_name, vendor_id, is_inhouse,
             lead_time_days, is_welding_stage, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id
         """, (
             route_id, idx, stage.process_name, stage.vendor_id,
             1 if stage.is_inhouse else 0, stage.lead_time_days,
             1 if stage.is_welding_stage else 0, stage.notes
         ))
-        stage_id = cursor.lastrowid
+        stage_id = cursor.fetchone()["id"]
         
         # If welding stage, insert child components
         if stage.is_welding_stage and stage.welding_components:
             for comp in stage.welding_components:
                 cursor.execute("""
                 INSERT INTO welding_boms (route_stage_id, parent_item_code, child_item_code, quantity_per_unit, unit)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
                 """, (
                     stage_id, payload.item_code, comp.get("child_item_code"),
                     float(comp.get("quantity_per_unit", 1.0)), comp.get("unit", "pcs")
@@ -2724,9 +2669,9 @@ def bulk_dispatch_to_vendor(payload: BulkDispatchToVendor):
     Dispatches multiple distinct items/batches to a single vendor on a shared delivery challan.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
-    cursor.execute("SELECT id, name, default_lead_time_days FROM vendors WHERE id = ?", (payload.vendor_id,))
+    cursor.execute("SELECT id, name, default_lead_time_days FROM vendors WHERE id = %s", (payload.vendor_id,))
     vendor = cursor.fetchone()
     if not vendor:
         conn.close()
@@ -2739,20 +2684,20 @@ def bulk_dispatch_to_vendor(payload: BulkDispatchToVendor):
     
     dispatched_items = []
     for itm in payload.items:
-        cursor.execute("SELECT id, item_code, current_stage_sequence FROM batches WHERE id = ?", (itm.batch_id,))
+        cursor.execute("SELECT id, item_code, current_stage_sequence FROM batches WHERE id = %s", (itm.batch_id,))
         batch = cursor.fetchone()
         if not batch:
             continue
             
         cursor.execute("""
         UPDATE batches
-        SET current_vendor_id = ?,
+        SET current_vendor_id = %s,
             is_inhouse = 0,
             status = 'With Vendor',
-            date_sent_to_vendor = ?,
-            expected_delivery_date = ?,
-            challan_no = ?
-        WHERE id = ?
+            date_sent_to_vendor = %s,
+            expected_delivery_date = %s,
+            challan_no = %s
+        WHERE id = %s
         """, (payload.vendor_id, today_str, exp_date, challan_no, itm.batch_id))
         
         # Record challan row
@@ -2760,7 +2705,7 @@ def bulk_dispatch_to_vendor(payload: BulkDispatchToVendor):
         INSERT INTO delivery_challans (
             challan_no, challan_type, date, vendor_id, batch_id, item_code,
             process_name, quantity, transporter, vehicle_no, remarks
-        ) VALUES (?, 'Outward to Vendor', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, 'Outward to Vendor', %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             challan_no, today_str, payload.vendor_id, itm.batch_id, itm.item_code,
             itm.process_name, itm.quantity, payload.transporter, payload.vehicle_no,
@@ -2790,7 +2735,7 @@ def get_assemblies():
     including current finished and WIP stock of each component item.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     cursor.execute("""
     SELECT id, assembly_code, name, description, customer, drawing_no, created_at
@@ -2806,7 +2751,7 @@ def get_assemblies():
             b.consumption_qty, b.unit, b.notes
         FROM assembly_bom b
         JOIN items i ON b.item_code = i.item_code
-        WHERE b.assembly_id = ?
+        WHERE b.assembly_id = %s
         ORDER BY b.item_code ASC
         """, (asm["id"],))
         bom_items = [dict(r) for r in cursor.fetchall()]
@@ -2816,16 +2761,16 @@ def get_assemblies():
             # Finished stock: Completed status or current_process = 'Finished Product'
             cursor.execute("""
             SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-            WHERE item_code = ? AND (status = 'Completed' OR current_process = 'Finished Product')
+            WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
             """, (itm["item_code"],))
-            itm["finished_stock"] = cursor.fetchone()[0]
+            itm["finished_stock"] = cursor.list(cursor.fetchone().values())[0]
             
             # In-process WIP stock
             cursor.execute("""
             SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-            WHERE item_code = ? AND status != 'Completed' AND current_process != 'Finished Product'
+            WHERE item_code = %s AND status != 'Completed' AND current_process != 'Finished Product'
             """, (itm["item_code"],))
-            itm["wip_stock"] = cursor.fetchone()[0]
+            itm["wip_stock"] = cursor.list(cursor.fetchone().values())[0]
             
         asm["bom_items"] = bom_items
         asm["total_components_count"] = len(bom_items)
@@ -2836,13 +2781,14 @@ def get_assemblies():
 @app.post("/api/assemblies")
 def create_assembly(payload: AssemblyCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     try:
         cursor.execute("""
         INSERT INTO assemblies (assembly_code, name, description, customer, drawing_no)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
+    RETURNING id
         """, (payload.assembly_code.strip().upper(), payload.name.strip(), payload.description, payload.customer, payload.drawing_no))
-        asm_id = cursor.lastrowid
+        asm_id = cursor.fetchone()["id"]
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
@@ -2853,14 +2799,14 @@ def create_assembly(payload: AssemblyCreate):
 @app.put("/api/assemblies/{assembly_id}")
 def update_assembly(assembly_id: int, payload: AssemblyUpdate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     cursor.execute("""
     UPDATE assemblies 
-    SET name = COALESCE(?, name),
-        description = COALESCE(?, description),
-        customer = COALESCE(?, customer),
-        drawing_no = COALESCE(?, drawing_no)
-    WHERE id = ?
+    SET name = COALESCE(%s, name),
+        description = COALESCE(%s, description),
+        customer = COALESCE(%s, customer),
+        drawing_no = COALESCE(%s, drawing_no)
+    WHERE id = %s
     """, (payload.name, payload.description, payload.customer, payload.drawing_no, assembly_id))
     conn.commit()
     conn.close()
@@ -2869,11 +2815,11 @@ def update_assembly(assembly_id: int, payload: AssemblyUpdate):
 @app.delete("/api/assemblies/{assembly_id}")
 def delete_assembly(assembly_id: int):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM assemblies WHERE id = ?", (assembly_id,))
-    cursor.execute("DELETE FROM assembly_bom WHERE assembly_id = ?", (assembly_id,))
-    cursor.execute("DELETE FROM assembly_monthly_plans WHERE assembly_id = ?", (assembly_id,))
-    cursor.execute("DELETE FROM assembly_daily_plans WHERE assembly_id = ?", (assembly_id,))
+    cursor = get_cursor(conn)
+    cursor.execute("DELETE FROM assemblies WHERE id = %s", (assembly_id,))
+    cursor.execute("DELETE FROM assembly_bom WHERE assembly_id = %s", (assembly_id,))
+    cursor.execute("DELETE FROM assembly_monthly_plans WHERE assembly_id = %s", (assembly_id,))
+    cursor.execute("DELETE FROM assembly_daily_plans WHERE assembly_id = %s", (assembly_id,))
     conn.commit()
     conn.close()
     return {"message": "Assembly deleted successfully"}
@@ -2881,23 +2827,23 @@ def delete_assembly(assembly_id: int):
 @app.post("/api/assemblies/{assembly_id}/bom")
 def assign_item_to_assembly(assembly_id: int, payload: AssemblyBOMItemCreate):
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # Verify assembly exists
-    cursor.execute("SELECT id FROM assemblies WHERE id = ?", (assembly_id,))
+    cursor.execute("SELECT id FROM assemblies WHERE id = %s", (assembly_id,))
     if not cursor.fetchone():
         conn.close()
         raise HTTPException(status_code=404, detail="Assembly not found")
         
     # Verify item exists
-    cursor.execute("SELECT item_code FROM items WHERE item_code = ?", (payload.item_code,))
+    cursor.execute("SELECT item_code FROM items WHERE item_code = %s", (payload.item_code,))
     if not cursor.fetchone():
         conn.close()
         raise HTTPException(status_code=404, detail=f"Item code '{payload.item_code}' not found")
         
     cursor.execute("""
     INSERT INTO assembly_bom (assembly_id, item_code, consumption_qty, unit, notes)
-    VALUES (?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s)
     ON CONFLICT(assembly_id, item_code) DO UPDATE SET
         consumption_qty = excluded.consumption_qty,
         unit = excluded.unit,
@@ -2911,8 +2857,8 @@ def assign_item_to_assembly(assembly_id: int, payload: AssemblyBOMItemCreate):
 @app.delete("/api/assemblies/{assembly_id}/bom/{bom_id}")
 def remove_item_from_assembly(assembly_id: int, bom_id: int):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM assembly_bom WHERE id = ? AND assembly_id = ?", (bom_id, assembly_id))
+    cursor = get_cursor(conn)
+    cursor.execute("DELETE FROM assembly_bom WHERE id = %s AND assembly_id = %s", (bom_id, assembly_id))
     conn.commit()
     conn.close()
     return {"message": "Component item removed from assembly"}
@@ -2933,7 +2879,7 @@ def get_production_plans(month: Optional[str] = None):
     num_days = calendar.monthrange(year, m)[1]
     
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # 1. Fetch all assemblies
     cursor.execute("SELECT id, assembly_code, name, customer, drawing_no FROM assemblies ORDER BY assembly_code ASC")
@@ -2957,7 +2903,7 @@ def get_production_plans(month: Optional[str] = None):
         cursor.execute("""
         SELECT target_quantity, working_days, notes
         FROM assembly_monthly_plans
-        WHERE year_month = ? AND assembly_id = ?
+        WHERE year_month = %s AND assembly_id = %s
         """, (month, asm["id"]))
         m_row = cursor.fetchone()
         asm["target_quantity"] = m_row["target_quantity"] if m_row else 0
@@ -2968,7 +2914,7 @@ def get_production_plans(month: Optional[str] = None):
         cursor.execute("""
         SELECT plan_date, planned_quantity, actual_quantity, notes
         FROM assembly_daily_plans
-        WHERE plan_date LIKE ? AND assembly_id = ?
+        WHERE plan_date LIKE %s AND assembly_id = %s
         """, (f"{month}-%", asm["id"]))
         rows = cursor.fetchall()
         day_map = {row["plan_date"]: row["planned_quantity"] for row in rows}
@@ -3012,12 +2958,12 @@ def save_monthly_targets(payload: MonthlyTargetsPayload):
     num_working = len(working_dates) or 1
     
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     for item in payload.targets:
         cursor.execute("""
         INSERT INTO assembly_monthly_plans (year_month, assembly_id, target_quantity, working_days, notes)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT(year_month, assembly_id) DO UPDATE SET
             target_quantity = excluded.target_quantity,
             working_days = excluded.working_days,
@@ -3033,7 +2979,7 @@ def save_monthly_targets(payload: MonthlyTargetsPayload):
             # Clear existing daily plan for this month and assembly
             cursor.execute("""
             DELETE FROM assembly_daily_plans 
-            WHERE plan_date LIKE ? AND assembly_id = ?
+            WHERE plan_date LIKE %s AND assembly_id = %s
             """, (f"{payload.year_month}-%", item.assembly_id))
             
             # Insert distributed quantities
@@ -3041,7 +2987,7 @@ def save_monthly_targets(payload: MonthlyTargetsPayload):
                 daily_qty = base_qty + (1 if idx < remainder else 0)
                 cursor.execute("""
                 INSERT INTO assembly_daily_plans (plan_date, assembly_id, planned_quantity, notes)
-                VALUES (?, ?, ?, 'Auto-distributed from monthly plan')
+                VALUES (%s, %s, %s, 'Auto-distributed from monthly plan')
                 """, (date_str, item.assembly_id, daily_qty))
                 
     conn.commit()
@@ -3054,12 +3000,12 @@ def save_daily_schedule(payload: DailyScheduleBatchUpdate):
     Save custom/fine-tuned daywise quantities (both planned and actual) for assemblies.
     """
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     for item in payload.items:
         cursor.execute("""
         INSERT INTO assembly_daily_plans (plan_date, assembly_id, planned_quantity, actual_quantity, notes)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT(plan_date, assembly_id) DO UPDATE SET
             planned_quantity = excluded.planned_quantity,
             actual_quantity = excluded.actual_quantity,
@@ -3092,7 +3038,7 @@ def calculate_daily_consumption(month: Optional[str] = None):
     num_days = calendar.monthrange(year, m)[1]
     
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # 1. Build calendar days
     days_info = []
@@ -3113,7 +3059,7 @@ def calculate_daily_consumption(month: Optional[str] = None):
     cursor.execute("""
     SELECT plan_date, assembly_id, planned_quantity, actual_quantity
     FROM assembly_daily_plans
-    WHERE plan_date LIKE ?
+    WHERE plan_date LIKE %s
     """, (f"{month}-%",))
     
     # plans_by_date[date][assembly_id] = { "planned": qty, "actual": actual_qty }
@@ -3176,16 +3122,16 @@ def calculate_daily_consumption(month: Optional[str] = None):
         # Current completed finished stock
         cursor.execute("""
         SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-        WHERE item_code = ? AND (status = 'Completed' OR current_process = 'Finished Product')
+        WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (icode,))
-        current_finished = cursor.fetchone()[0]
+        current_finished = cursor.list(cursor.fetchone().values())[0]
         
         # Current in-progress WIP across vendors
         cursor.execute("""
         SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-        WHERE item_code = ? AND status != 'Completed' AND current_process != 'Finished Product'
+        WHERE item_code = %s AND status != 'Completed' AND current_process != 'Finished Product'
         """, (icode,))
-        current_wip = cursor.fetchone()[0]
+        current_wip = cursor.list(cursor.fetchone().values())[0]
         
         # Calculate daily consumption for this item
         daily_quantities = {}
@@ -3338,7 +3284,7 @@ def get_items_to_start(month: Optional[str] = None, target_date: Optional[str] =
     num_days = calendar.monthrange(year, m)[1]
     
     conn = get_db()
-    cursor = conn.cursor()
+    cursor = get_cursor(conn)
     
     # 1. Fetch days
     days_info = []
@@ -3392,7 +3338,7 @@ def get_items_to_start(month: Optional[str] = None, target_date: Optional[str] =
         FROM assembly_daily_plans adp
         JOIN assembly_bom ab ON adp.assembly_id = ab.assembly_id
         JOIN assemblies a ON adp.assembly_id = a.id
-        WHERE adp.plan_date LIKE ?
+        WHERE adp.plan_date LIKE %s
         ORDER BY adp.plan_date ASC
     """, (f"{month}-%",))
     daily_bom_rows = cursor.fetchall()
@@ -3459,9 +3405,9 @@ def get_items_to_start(month: Optional[str] = None, target_date: Optional[str] =
         # Stock: Finished & WIP
         cursor.execute("""
             SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-            WHERE item_code = ? AND (status = 'Completed' OR current_process = 'Finished Product')
+            WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (icode,))
-        finished_stock = cursor.fetchone()[0]
+        finished_stock = cursor.list(cursor.fetchone().values())[0]
         
         cursor.execute("""
             SELECT b.id, b.batch_no, b.quantity_accepted, b.current_process, b.current_stage_sequence,
@@ -3469,7 +3415,7 @@ def get_items_to_start(month: Optional[str] = None, target_date: Optional[str] =
                    b.date_sent_to_vendor, b.expected_delivery_date, b.status
             FROM batches b
             LEFT JOIN vendors v ON b.current_vendor_id = v.id
-            WHERE b.item_code = ? AND b.status != 'Completed' AND b.current_process != 'Finished Product'
+            WHERE b.item_code = %s AND b.status != 'Completed' AND b.current_process != 'Finished Product'
             ORDER BY b.current_stage_sequence ASC
         """, (icode,))
         wip_batches = [dict(b) for b in cursor.fetchall()]

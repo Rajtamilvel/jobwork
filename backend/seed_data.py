@@ -1,4 +1,3 @@
-import sqlite3
 from datetime import datetime, timedelta
 import os
 from database import get_db, init_db
@@ -33,7 +32,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO raw_materials (code, name, grade, form, unit, stock_quantity, heat_number, unit_cost, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, raw_materials)
 
     # 2. Seed Vendors (Specialized sub-contractors with lead times)
@@ -48,7 +47,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO vendors (code, name, contact_person, phone, email, address, processes_offered, default_lead_time_days, rating, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, vendors)
 
     # 3. Seed Items (Item code constant across all states)
@@ -61,7 +60,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO items (item_code, name, drawing_no, revision, material_code, default_quantity, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
     """, items)
 
     # 4. Seed Process Routes
@@ -75,7 +74,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO process_routes (item_code, route_name, is_default, description)
-    VALUES (?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s)
     """, routes)
 
     # Route IDs
@@ -105,7 +104,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO route_stages (route_id, sequence_no, process_name, vendor_id, is_inhouse, lead_time_days, is_welding_stage, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, cm001_stages)
 
     # CM001 Express Route stages
@@ -118,7 +117,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO route_stages (route_id, sequence_no, process_name, vendor_id, is_inhouse, lead_time_days, is_welding_stage, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, cm001_express_stages)
 
     # CM-WELD-01 Route with WELDING STAGE
@@ -132,7 +131,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO route_stages (route_id, sequence_no, process_name, vendor_id, is_inhouse, lead_time_days, is_welding_stage, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, weld_stages)
 
     # CM002 Route Stages (Flange Collar - Terminates with Finished Product for Production Assembly)
@@ -144,11 +143,11 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO route_stages (route_id, sequence_no, process_name, vendor_id, is_inhouse, lead_time_days, is_welding_stage, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, cm002_stages)
 
     # Get stage id for Welding
-    cursor.execute("SELECT id FROM route_stages WHERE route_id = ? AND is_welding_stage = 1", (cm_weld_id,))
+    cursor.execute("SELECT id FROM route_stages WHERE route_id = %s AND is_welding_stage = 1", (cm_weld_id,))
     weld_stage_id = cursor.fetchone()[0]
 
     # 6. Seed Welding BOM (Variable quantity child items per parent unit)
@@ -159,7 +158,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO welding_boms (route_stage_id, parent_item_code, child_item_code, quantity_per_unit, unit, notes)
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s)
     """, welding_boms)
 
     # 7. Seed Active Batches (Demonstrating all dashboard states & follow-up)
@@ -197,7 +196,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO batches (batch_no, item_code, route_id, current_stage_sequence, current_process, current_vendor_id, is_inhouse, quantity_total, quantity_accepted, quantity_rejected, raw_material_code, raw_material_quantity, raw_material_unit, status, is_critical, date_started, date_sent_to_vendor, expected_delivery_date, actual_delivery_date, challan_no, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, batches)
 
     # Query batch ids
@@ -219,7 +218,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO batch_history (batch_id, stage_sequence, process_name, vendor_id, is_inhouse, quantity_in, quantity_out, quantity_rejected, date_in, date_out, challan_in, challan_out, remarks)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, history)
 
     # 9. Seed Vendor Delivery Follow-up Logs (Requirement: follow up for delivery when sent to vendor)
@@ -230,7 +229,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO vendor_followups (batch_id, vendor_id, challan_no, date_contacted, contact_person, method, vendor_status_update, promised_date, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, followups)
 
     # 10. Seed Delivery Challans (Outward DC for tracking materials sent to vendor)
@@ -242,7 +241,7 @@ def seed_database():
     ]
     cursor.executemany("""
     INSERT INTO delivery_challans (challan_no, challan_type, date, vendor_id, batch_id, item_code, process_name, quantity, weight_or_length, unit, transporter, vehicle_no, remarks, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, challans)
 
     # 11. Seed Assemblies & Assembly BOM (Consumption Mapping)
@@ -272,9 +271,9 @@ def seed_assemblies_if_needed(cursor, conn):
         cursor.execute("""
         INSERT INTO assembly_bom (assembly_id, item_code, consumption_qty, unit, notes)
         VALUES
-        (?, 'CM001', 1.0, 'pcs', 'Main flanged pinion shaft (1 pc/assembly)'),
-        (?, 'CM002', 2.0, 'pcs', 'Dual collar mounting flanges (2 pcs/assembly)'),
-        (?, 'CM002', 2.0, 'pcs', 'Front and rear spacer flanges (2 pcs/assembly)')
+        (%s, 'CM001', 1.0, 'pcs', 'Main flanged pinion shaft (1 pc/assembly)'),
+        (%s, 'CM002', 2.0, 'pcs', 'Dual collar mounting flanges (2 pcs/assembly)'),
+        (%s, 'CM002', 2.0, 'pcs', 'Front and rear spacer flanges (2 pcs/assembly)')
         """, (asm_map['CM101A6'], asm_map['CM101A6'], asm_map['CM101A7']))
 
         # Seed Current Month Production Plans
@@ -282,8 +281,8 @@ def seed_assemblies_if_needed(cursor, conn):
         cursor.execute("""
         INSERT INTO assembly_monthly_plans (year_month, assembly_id, target_quantity, working_days, notes)
         VALUES
-        (?, ?, 250, 25, 'Standard monthly OEM delivery commitment'),
-        (?, ?, 200, 25, 'Scheduled export shipment')
+        (%s, %s, 250, 25, 'Standard monthly OEM delivery commitment'),
+        (%s, %s, 200, 25, 'Scheduled export shipment')
         """, (current_ym, asm_map['CM101A6'], current_ym, asm_map['CM101A7']))
 
         # Distribute daywise plan for working days of current month
@@ -302,7 +301,7 @@ def seed_assemblies_if_needed(cursor, conn):
 
         cursor.executemany("""
         INSERT INTO assembly_daily_plans (plan_date, assembly_id, planned_quantity, notes)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
         """, daily_entries)
         conn.commit()
         print("Assemblies, BOM mappings (CM001, CM002), and Production Plans successfully seeded.")

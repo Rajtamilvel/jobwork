@@ -1,8 +1,7 @@
--- ==============================================================================
--- RAJTAMIL JOBWORK & SUBCONTRACT ENGINEERING OS
--- SUPABASE POSTGRESQL DATABASE SCHEMA & INITIAL SEED DATA
--- Copy and paste this script directly into Supabase Dashboard -> SQL Editor -> Run
--- ==============================================================================
+-- =============================================
+-- SUPABASE SCHEMA: Rajtamil Jobwork Engineer OS
+-- Run this in Supabase SQL Editor to create all tables
+-- =============================================
 
 -- 1. Raw Materials Master
 CREATE TABLE IF NOT EXISTS raw_materials (
@@ -10,28 +9,28 @@ CREATE TABLE IF NOT EXISTS raw_materials (
     code TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
     grade TEXT NOT NULL,
-    form TEXT NOT NULL,           -- Round Bar, Flat, Plate, Hex, Tube
-    unit TEXT NOT NULL,           -- kg, meters, mm, MT
-    stock_quantity NUMERIC DEFAULT 0,
+    form TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    stock_quantity DOUBLE PRECISION DEFAULT 0,
     heat_number TEXT,
-    unit_cost NUMERIC DEFAULT 0,
+    unit_cost DOUBLE PRECISION DEFAULT 0,
     notes TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 2. Manufactured Items Master (Item code is constant: CM001)
+-- 2. Manufactured Items Master
 CREATE TABLE IF NOT EXISTS items (
     id SERIAL PRIMARY KEY,
     item_code TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
     drawing_no TEXT,
-    revision TEXT DEFAULT 'A',
+    revision TEXT,
     material_code TEXT,
-    raw_material_name TEXT,
-    weight NUMERIC DEFAULT 0,
+    weight DOUBLE PRECISION DEFAULT 0,
     default_quantity INTEGER DEFAULT 100,
     notes TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    raw_material_name TEXT DEFAULT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 3. Vendors Master
@@ -45,22 +44,22 @@ CREATE TABLE IF NOT EXISTS vendors (
     address TEXT,
     processes_offered TEXT,
     default_lead_time_days INTEGER DEFAULT 3,
-    rating NUMERIC DEFAULT 4.5,
+    rating DOUBLE PRECISION DEFAULT 4.5,
     notes TEXT,
     vendor_type TEXT DEFAULT 'Local'
 );
 
--- 4. Process Routes (Multiple routes possible for 1 item)
+-- 4. Process Routes
 CREATE TABLE IF NOT EXISTS process_routes (
     id SERIAL PRIMARY KEY,
-    item_code TEXT NOT NULL,
+    item_code TEXT NOT NULL REFERENCES items(item_code),
     route_name TEXT NOT NULL,
     is_default INTEGER DEFAULT 1,
     description TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 5. Route Stages (Sequential steps in a route)
+-- 5. Route Stages
 CREATE TABLE IF NOT EXISTS route_stages (
     id SERIAL PRIMARY KEY,
     route_id INTEGER NOT NULL REFERENCES process_routes(id) ON DELETE CASCADE,
@@ -79,16 +78,16 @@ CREATE TABLE IF NOT EXISTS welding_boms (
     route_stage_id INTEGER NOT NULL REFERENCES route_stages(id) ON DELETE CASCADE,
     parent_item_code TEXT NOT NULL,
     child_item_code TEXT NOT NULL,
-    quantity_per_unit NUMERIC NOT NULL,
+    quantity_per_unit DOUBLE PRECISION NOT NULL,
     unit TEXT DEFAULT 'pcs',
     notes TEXT
 );
 
--- 7. Batches / Job Cards
+-- 7. Batches / Job Orders
 CREATE TABLE IF NOT EXISTS batches (
     id SERIAL PRIMARY KEY,
     batch_no TEXT UNIQUE NOT NULL,
-    item_code TEXT NOT NULL,
+    item_code TEXT NOT NULL REFERENCES items(item_code),
     route_id INTEGER NOT NULL REFERENCES process_routes(id),
     current_stage_sequence INTEGER NOT NULL,
     current_process TEXT NOT NULL,
@@ -98,7 +97,7 @@ CREATE TABLE IF NOT EXISTS batches (
     quantity_accepted INTEGER NOT NULL,
     quantity_rejected INTEGER DEFAULT 0,
     raw_material_code TEXT,
-    raw_material_quantity NUMERIC,
+    raw_material_quantity DOUBLE PRECISION,
     raw_material_unit TEXT,
     status TEXT NOT NULL,
     is_critical INTEGER DEFAULT 0,
@@ -154,7 +153,7 @@ CREATE TABLE IF NOT EXISTS delivery_challans (
     item_code TEXT NOT NULL,
     process_name TEXT,
     quantity INTEGER,
-    weight_or_length NUMERIC,
+    weight_or_length DOUBLE PRECISION,
     unit TEXT,
     transporter TEXT,
     vehicle_no TEXT,
@@ -170,18 +169,18 @@ CREATE TABLE IF NOT EXISTS assemblies (
     description TEXT,
     customer TEXT,
     drawing_no TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 12. Assembly BOM
 CREATE TABLE IF NOT EXISTS assembly_bom (
     id SERIAL PRIMARY KEY,
     assembly_id INTEGER NOT NULL REFERENCES assemblies(id) ON DELETE CASCADE,
-    item_code TEXT NOT NULL,
-    consumption_qty NUMERIC NOT NULL DEFAULT 1.0,
+    item_code TEXT NOT NULL REFERENCES items(item_code),
+    consumption_qty DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     unit TEXT DEFAULT 'pcs',
     notes TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(assembly_id, item_code)
 );
 
@@ -193,7 +192,7 @@ CREATE TABLE IF NOT EXISTS assembly_monthly_plans (
     target_quantity INTEGER NOT NULL DEFAULT 0,
     working_days INTEGER DEFAULT 25,
     notes TEXT,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(year_month, assembly_id)
 );
 
@@ -205,7 +204,7 @@ CREATE TABLE IF NOT EXISTS assembly_daily_plans (
     planned_quantity INTEGER NOT NULL DEFAULT 0,
     actual_quantity INTEGER DEFAULT NULL,
     notes TEXT,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(plan_date, assembly_id)
 );
 
@@ -219,12 +218,12 @@ CREATE TABLE IF NOT EXISTS stock_amendments (
     stage_name TEXT,
     raw_material_code TEXT,
     adjustment_type TEXT NOT NULL,
-    quantity NUMERIC NOT NULL,
-    previous_stock NUMERIC NOT NULL,
-    new_stock NUMERIC NOT NULL,
+    quantity DOUBLE PRECISION NOT NULL,
+    previous_stock DOUBLE PRECISION NOT NULL,
+    new_stock DOUBLE PRECISION NOT NULL,
     reason TEXT NOT NULL,
     remarks TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 16. Users Table for Authentication
@@ -234,35 +233,16 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     full_name TEXT NOT NULL,
     role TEXT DEFAULT 'Engineer',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ==============================================================================
--- INITIAL SEED DATA
--- ==============================================================================
-
--- Default Users (Password: username123 or username)
-INSERT INTO users (username, password_hash, full_name, role)
-VALUES 
-  ('admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'System Administrator', 'Admin'),
-  ('engineer', '264e1c255bcfe1ff1cbefbf7ff37df5c5e8c156968032644265cc2f90117b079', 'Lead Jobwork Engineer', 'Engineer'),
-  ('rajtamil', '60249210cfa0b322a30bbdf3228a472c3d5e2cfbe9c9ee0abf8b80d0d938b8fa', 'Rajtamil', 'Chief Operating Officer'),
-  ('supervisor', 'ca390971b9c9f2ec405a39cb6ffbc3eb1b708d727bca5e396dc70a24148e6580', 'Shopfloor Supervisor', 'Supervisor')
+-- =============================================
+-- SEED DEFAULT USERS
+-- =============================================
+-- Passwords: admin123, engineer123, rajtamil123, supervisor123 (SHA-256 hashed)
+INSERT INTO users (username, password_hash, full_name, role) VALUES
+    ('admin', '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9', 'System Administrator', 'Admin'),
+    ('engineer', 'b9a2e01ef58d02aca55e2d5413caff64da79f8e2efc42e6da46a7e0890dd57a3', 'Lead Jobwork Engineer', 'Engineer'),
+    ('rajtamil', '5b2e2649dd3e6dc87a53e7c2f5302de17de57caa2352d3e7c6bcda2c0dcbb3b4', 'Rajtamil', 'Chief Operating Officer'),
+    ('supervisor', 'f8c46e11b25d7da8ee7a3e7ad4d0fa38c1dd5c0dd0c6a1e6cb0de0d7be6d5c3a', 'Shopfloor Supervisor', 'Supervisor')
 ON CONFLICT (username) DO NOTHING;
-
--- Default Vendors
-INSERT INTO vendors (code, name, contact_person, phone, email, address, processes_offered, default_lead_time_days, rating, vendor_type)
-VALUES
-  ('VND-001', 'Sri Krishna Forgings', 'K. Balaji', '+91 98401 23456', 'balaji@srikrishnaforgings.com', 'SIDCO Industrial Estate, Ambattur, Chennai', 'Forging, Normalizing, Shot Blasting', 3, 4.8, 'Trip'),
-  ('VND-002', 'Precision Heat Treaters', 'S. Ramesh', '+91 94440 98765', 'ramesh@precisionheat.in', 'Phase II, Peenya Industrial Area, Bangalore', 'Hardening, Tempering, Nitriding', 4, 4.6, 'Trip'),
-  ('VND-003', 'Balaji CNC Works', 'M. Saravanan', '+91 97890 11223', 'works@balajicnc.co.in', 'Coimbatore Auto Hub, Ganapathy, Coimbatore', 'CNC Turning, VMC Milling, Wire EDM', 5, 4.9, 'Local'),
-  ('VND-004', 'Apex Surface Finishers', 'D. Anand', '+91 98844 55667', 'anand@apexfinish.com', 'SIPCOT, Sriperumbudur, Tamil Nadu', 'Zinc Plating, Blackodising, Passivation', 2, 4.4, 'Local')
-ON CONFLICT (code) DO NOTHING;
-
--- Default Manufactured Items
-INSERT INTO items (item_code, name, drawing_no, revision, material_code, raw_material_name, weight, default_quantity, notes)
-VALUES
-  ('CM001', 'Heavy Duty Drive Flange', 'DRW-CM-001', 'B', 'RM-EN8-01', 'EN8 Round Bar Dia 50mm', 3.5, 100, 'Standard drive component'),
-  ('CM002', 'Spline Input Shaft', 'DRW-CM-002', 'C', 'RM-EN19-02', 'EN19 Alloy Steel Bar Dia 35mm', 2.8, 150, 'High torque spline shaft'),
-  ('CM003', 'Intermediate Pinion', 'DRW-CM-003', 'A', 'RM-20MNCR5-01', '20MnCr5 Case Carburizing Steel', 1.9, 200, 'Gearbox intermediate gear')
-ON CONFLICT (item_code) DO NOTHING;

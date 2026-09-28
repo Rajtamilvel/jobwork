@@ -1,12 +1,7 @@
 [build]
-  command = "npm --prefix client install && npm --prefix client run build && node -e \"const fs=require('fs'); fs.cpSync('client/dist', 'dist', {recursive: true, force: true});\""
+  base = "client"
+  command = "npm run build"
   publish = "dist"
-
-[[redirects]]
-  from = "/api/*"
-  to = "https://jobwork-rajtamils-projects.vercel.app/api/:splat"
-  status = 200
-  force = true
 
 [[redirects]]
   from = "/*"

@@ -23,6 +23,19 @@ from models import (
     ItemUpdate, StockAmendmentCreate
 )
 
+
+def get_scalar(cursor, default=0):
+    row = cursor.fetchone()
+    if not row:
+        return default
+    if isinstance(row, dict):
+        val = next(iter(row.values()), default)
+    elif isinstance(row, (list, tuple)):
+        val = row[0]
+    else:
+        val = default
+    return default if val is None else val
+
 app = FastAPI(
     title="MachinaWork Jobwork Engineer API",
     description="Precision Jobwork & Subcontract Engineering Management API",
@@ -308,7 +321,7 @@ def get_dashboard_overview():
     critical_batches_count = cursor.fetchone()["count"]
     
     cursor.execute("SELECT SUM(quantity_accepted) FROM batches WHERE status != 'Completed'")
-    total_pieces_in_progress = cursor.list(cursor.fetchone().values())[0] or 0
+    total_pieces_in_progress = get_scalar(cursor, 0)
 
     # Detailed Batch Matrix
     cursor.execute("""
@@ -1575,7 +1588,7 @@ def check_welding_component_readiness(batch_id: int):
         FROM batches
         WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (row["child_item_code"],))
-        available_qty = cursor.list(cursor.fetchone().values())[0]
+        available_qty = get_scalar(cursor, 0)
         
         is_ready = available_qty >= req_qty
         if not is_ready:
@@ -2148,7 +2161,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
         SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
         WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (payload.item_code,))
-        previous_stock = float(cursor.list(cursor.fetchone().values())[0] or 0)
+        previous_stock = float(get_scalar(cursor, 0))
 
         if payload.adjustment_type == "add":
             new_stock = previous_stock + payload.quantity
@@ -2835,14 +2848,14 @@ def get_assemblies():
             SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
             WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
             """, (itm["item_code"],))
-            itm["finished_stock"] = cursor.list(cursor.fetchone().values())[0]
+            itm["finished_stock"] = get_scalar(cursor, 0)
             
             # In-process WIP stock
             cursor.execute("""
             SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
             WHERE item_code = %s AND status != 'Completed' AND current_process != 'Finished Product'
             """, (itm["item_code"],))
-            itm["wip_stock"] = cursor.list(cursor.fetchone().values())[0]
+            itm["wip_stock"] = get_scalar(cursor, 0)
             
         asm["bom_items"] = bom_items
         asm["total_components_count"] = len(bom_items)
@@ -3196,14 +3209,14 @@ def calculate_daily_consumption(month: Optional[str] = None):
         SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
         WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (icode,))
-        current_finished = cursor.list(cursor.fetchone().values())[0]
+        current_finished = get_scalar(cursor, 0)
         
         # Current in-progress WIP across vendors
         cursor.execute("""
         SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
         WHERE item_code = %s AND status != 'Completed' AND current_process != 'Finished Product'
         """, (icode,))
-        current_wip = cursor.list(cursor.fetchone().values())[0]
+        current_wip = get_scalar(cursor, 0)
         
         # Calculate daily consumption for this item
         daily_quantities = {}
@@ -3479,7 +3492,7 @@ def get_items_to_start(month: Optional[str] = None, target_date: Optional[str] =
             SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
             WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
         """, (icode,))
-        finished_stock = cursor.list(cursor.fetchone().values())[0]
+        finished_stock = get_scalar(cursor, 0)
         
         cursor.execute("""
             SELECT b.id, b.batch_no, b.quantity_accepted, b.current_process, b.current_stage_sequence,

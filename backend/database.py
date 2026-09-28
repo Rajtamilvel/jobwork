@@ -47,13 +47,14 @@ class SupabaseHttpCursor:
         self.rowcount = -1
 
     def execute(self, sql: str, params: Optional[tuple] = None):
-        formatted_sql = self._format_query(sql, params)
+        formatted_sql = self._format_query(sql.strip(), params)
         self._rows = self.conn._run_rpc(formatted_sql)
         self._idx = 0
         self.rowcount = len(self._rows) if isinstance(self._rows, list) else -1
         return self
 
     def _format_query(self, sql: str, params: Optional[tuple]) -> str:
+        sql = sql.strip()
         if not params:
             return sql
         formatted = []

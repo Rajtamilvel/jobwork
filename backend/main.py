@@ -37,12 +37,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "MachinaWork Jobwork Engineer API",
+        "docs": "/docs",
+        "database": "configured" if os.environ.get("DATABASE_URL") else "DATABASE_URL missing"
+    }
+
+@app.get("/api/health")
+def health():
+    db_status = "unknown"
+    error = None
+    try:
+        conn = get_db()
+        cur = get_cursor(conn)
+        cur.execute("SELECT 1 as ok")
+        row = cur.fetchone()
+        db_status = "connected" if row and row.get("ok") == 1 else "ok"
+        cur.close()
+        conn.close()
+    except Exception as e:
+        db_status = "error"
+        error = str(e)
+    return {"status": "online", "database": db_status, "error": error}
+
 @app.on_event("startup")
 def startup_event():
-    init_db()
-    # Auto-seed if empty
-    from seed_data import seed_database
-    seed_database()
+    try:
+        init_db()
+        try:
+            from seed_data import seed_database
+            seed_database()
+        except Exception as seed_err:
+            print(f"Seed note: {seed_err}")
+    except Exception as e:
+        print(f"Startup database warning: {e}")
 
 # Helper to calculate lead time status
 def calculate_lead_status(date_sent_str, exp_date_str, status_text):

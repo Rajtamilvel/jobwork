@@ -14,9 +14,14 @@ def get_db():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError(
-            "DATABASE_URL is not set. Please set DATABASE_URL in backend/.env or in Vercel Environment Variables.\n"
+            "DATABASE_URL is not set. Please set DATABASE_URL in Vercel Project Settings -> Environment Variables.\n"
             "Format: postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres"
         )
+    # Ensure sslmode=require for Supabase and cloud PostgreSQL
+    if "sslmode=" not in url and ("supabase.co" in url or "neon.tech" in url or "pooler.supabase.com" in url):
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}sslmode=require"
+
     conn = psycopg2.connect(url)
     conn.autocommit = False
     return conn

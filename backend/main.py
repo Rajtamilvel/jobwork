@@ -7,8 +7,9 @@ from typing import Optional, List
 # Ensure local backend modules can be imported in any deployment environment (e.g. Vercel)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from database import get_db, get_cursor, init_db
 from models import (
     LoginRequest,
@@ -37,13 +38,53 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class VercelPathNormalizeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # 1. Recover the original URL from Vercel headers if rewritten
+        raw = (
+            request.headers.get("x-forwarded-uri") or 
+            request.headers.get("x-matched-path") or 
+            request.scope.get("path", "/")
+        )
+        if "?" in raw:
+            raw = raw.split("?")[0]
+
+        # Strip any Vercel internal serverless filename artifacts
+        for artifact in ("/api/index.py", "/api/index"):
+            if raw.startswith(artifact):
+                raw = raw[len(artifact):] or "/"
+
+        path = raw
+
+        # Pass documentation routes directly
+        if path in ("/docs", "/openapi.json", "/redoc"):
+            request.scope["path"] = path
+            return await call_next(request)
+
+        # Pass root / status routes
+        if path in ("/", "/api", "/api/"):
+            request.scope["path"] = "/"
+            return await call_next(request)
+
+        # Ensure all API endpoints match the /api/ prefix
+        if not path.startswith("/api/"):
+            path = "/api/" + path.lstrip("/")
+
+        request.scope["path"] = path
+        return await call_next(request)
+
+app.add_middleware(VercelPathNormalizeMiddleware)
+
 @app.get("/")
+@app.get("/api")
+@app.get("/api/")
 def root():
+    has_db = bool(os.environ.get("DATABASE_URL") or (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SECRET_KEY")))
     return {
         "status": "online",
         "service": "MachinaWork Jobwork Engineer API",
         "docs": "/docs",
-        "database": "configured" if os.environ.get("DATABASE_URL") else "DATABASE_URL missing"
+        "database": "configured" if has_db else "missing credentials"
     }
 
 @app.get("/api/health")

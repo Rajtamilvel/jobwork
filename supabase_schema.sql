@@ -257,10 +257,13 @@ SECURITY DEFINER
 AS $$
 DECLARE
     result jsonb;
-    clean text := trim(query);
+    clean text := trim(regexp_replace(query, '^\s+', ''));
 BEGIN
-    IF clean ~* '^(SELECT|WITH)\s' OR clean ~* '\sRETURNING\s' THEN
+    IF clean ~* '^(SELECT)\s' OR (clean ~* '^WITH\s' AND clean !~* '\s(INSERT|UPDATE|DELETE)\s') THEN
         EXECUTE 'SELECT coalesce(jsonb_agg(to_jsonb(t)), ''[]''::jsonb) FROM (' || clean || ') t' INTO result;
+        RETURN result;
+    ELSIF clean ~* '\sRETURNING\s' THEN
+        EXECUTE 'WITH affected_rows AS (' || clean || ') SELECT coalesce(jsonb_agg(to_jsonb(affected_rows)), ''[]''::jsonb) FROM affected_rows' INTO result;
         RETURN result;
     ELSE
         EXECUTE clean;

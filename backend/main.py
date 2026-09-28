@@ -1155,7 +1155,7 @@ def add_raw_material(payload: RawMaterialCreate):
             payload.stock_quantity, payload.heat_number, payload.unit_cost, payload.notes
         ))
         conn.commit()
-    except sqlite3.IntegrityError:
+    except Exception as e:
         conn.close()
         raise HTTPException(status_code=400, detail="Raw Material Code already exists")
     conn.close()
@@ -1230,7 +1230,7 @@ def create_item(payload: ItemCreate):
             payload.material_code, payload.raw_material_name, payload.weight or 0.0, payload.default_quantity, payload.notes
         ))
         conn.commit()
-    except sqlite3.IntegrityError:
+    except Exception as e:
         conn.close()
         raise HTTPException(status_code=400, detail="Item Code already exists")
     conn.close()
@@ -1652,7 +1652,7 @@ def create_vendor(payload: VendorCreate):
         ))
         vendor_id = cursor.fetchone()["id"]
         conn.commit()
-    except sqlite3.IntegrityError:
+    except Exception as e:
         conn.close()
         raise HTTPException(status_code=400, detail="Vendor code already exists")
     conn.close()
@@ -2680,7 +2680,7 @@ def create_item_with_route(payload: ItemWithRouteCreate):
         INSERT INTO items (item_code, name, drawing_no, revision, material_code, raw_material_name, weight, notes)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (payload.item_code, payload.name, payload.drawing_no, payload.revision, payload.material_code, payload.raw_material_name, payload.weight or 0.0, payload.notes))
-    except sqlite3.IntegrityError:
+    except Exception as e:
         conn.close()
         raise HTTPException(status_code=400, detail=f"Item Code '{payload.item_code}' already exists")
 
@@ -2875,7 +2875,7 @@ def create_assembly(payload: AssemblyCreate):
         """, (payload.assembly_code.strip().upper(), payload.name.strip(), payload.description, payload.customer, payload.drawing_no))
         asm_id = cursor.fetchone()["id"]
         conn.commit()
-    except sqlite3.IntegrityError:
+    except Exception as e:
         conn.close()
         raise HTTPException(status_code=400, detail=f"Assembly code '{payload.assembly_code}' already exists")
     conn.close()

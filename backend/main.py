@@ -43,11 +43,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for Vite frontend
+# Enable CORS for Vite frontend & Netlify
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -361,7 +361,7 @@ def get_dashboard_overview():
         WHERE route_id = %s AND sequence_no = %s
         """, (row["route_id"], row["current_stage_sequence"]))
         stage_meta = cursor.fetchone()
-        is_welding = bool(stage_meta[0]) if stage_meta else False
+        is_welding = bool(stage_meta.get("is_welding_stage")) if isinstance(stage_meta, dict) else (bool(stage_meta[0]) if stage_meta else False)
 
         batches.append({
             "id": row["id"],

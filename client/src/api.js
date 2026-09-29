@@ -1,4 +1,5 @@
-const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+const API_BASE = import.meta.env.VITE_API_BASE || (import.meta.env.DEV ? '/api' : 'https://jobwork-nu.vercel.app/api');
+
 
 export async function loginUser(username, password) {
   const res = await fetch(`${API_BASE}/auth/login`, {

@@ -2,8 +2,15 @@
   command = "npm run build"
   publish = "dist"
 
+[[redirects]]
+  from = "/api/*"
+  to = "https://jobwork-nu.vercel.app/api/:splat"
+  status = 200
+  force = true
+
 # SPA fallback: redirect all routes to index.html for client-side routing
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+

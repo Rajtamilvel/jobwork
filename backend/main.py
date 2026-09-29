@@ -16,6 +16,7 @@ from models import (
     SignupRequest,
     RawMaterialCreate, RawMaterialIssue, ItemCreate, VendorCreate,
     ProcessRouteCreate, WeldingBOMItemCreate, BatchCreate, BatchAdvance, BatchRework,
+    SplitAllocation, BatchSplitAdvance,
     VendorFollowUpCreate, ChallanCreate, ItemWithRouteCreate,
     BulkDispatchToVendor, StageDefinition,
     AssemblyCreate, AssemblyUpdate, AssemblyBOMItemCreate, AssemblyBOMItemUpdate,
@@ -847,6 +848,354 @@ def advance_batch_stage(batch_id: int, payload: BatchAdvance):
         "pending_quantity": pending_qty if pending_qty > 0 else 0,
         "message": f"Successfully moved {adv_accepted} pcs to {next_stage['process_name']}" + (f" ({pending_qty} pcs pending as {remainder_batch_no})" if remainder_batch_no else "")
     }
+
+@app.post("/api/batches/{batch_id}/split-advance")
+def split_advance_batch(batch_id: int, payload: BatchSplitAdvance):
+    """
+    1-Click Multi-Vendor Lot Split during stage advance.
+    Allows splitting a lot across multiple vendors or in-house stations (e.g. 1500 pcs cutting completed:
+    1000 pcs to Vendor A, 500 pcs to Vendor B for Forging).
+    Maintains complete lineage, batch history, and individual delivery challans for each sub-lot.
+    """
+    if not payload.allocations or len(payload.allocations) == 0:
+        raise HTTPException(status_code=400, detail="At least one destination allocation is required.")
+
+    conn = get_db()
+    cursor = get_cursor(conn)
+
+    cursor.execute("""
+    SELECT 
+        b.id, b.batch_no, b.item_code, b.route_id, b.current_stage_sequence,
+        b.current_process, b.current_vendor_id, b.is_inhouse, b.quantity_total,
+        b.quantity_accepted, b.quantity_rejected, b.challan_no, b.date_started,
+        b.date_sent_to_vendor, b.expected_delivery_date, b.raw_material_code,
+        b.raw_material_quantity, b.raw_material_unit, b.status, b.is_critical
+    FROM batches b
+    WHERE b.id = %s
+    """, (batch_id,))
+    batch = cursor.fetchone()
+    if not batch:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    curr_seq = batch["current_stage_sequence"]
+    curr_accepted = batch["quantity_accepted"] or 0
+    today = datetime.now()
+    today_str = today.strftime("%Y-%m-%d")
+
+    # Validate allocations
+    total_allocated = sum(int(a.quantity) for a in payload.allocations)
+    rejected_qty = int(payload.quantity_rejected or 0)
+
+    if total_allocated <= 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Total allocated quantity across destinations must be greater than 0.")
+
+    if total_allocated + rejected_qty > curr_accepted:
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Total dispatched ({total_allocated} allocated + {rejected_qty} rejected = {total_allocated + rejected_qty}) exceeds available batch quantity ({curr_accepted} pcs)."
+        )
+
+    # Check next stage
+    cursor.execute("""
+    SELECT id, sequence_no, process_name, vendor_id, is_inhouse, lead_time_days, is_welding_stage
+    FROM route_stages
+    WHERE route_id = %s AND sequence_no > %s
+    ORDER BY sequence_no ASC LIMIT 1
+    """, (batch["route_id"], curr_seq))
+    next_stage = cursor.fetchone()
+
+    is_next_finished = (not next_stage) or (next_stage["process_name"].strip().lower() == "finished product")
+    next_seq = next_stage["sequence_no"] if next_stage else (curr_seq + 1)
+    next_process_name = "Finished Product" if is_next_finished else next_stage["process_name"]
+
+    # Remainder batch if unallocated quantity remains at current stage
+    pending_qty = curr_accepted - total_allocated - rejected_qty
+    remainder_batch_no = None
+    if pending_qty > 0:
+        base_no = batch["batch_no"]
+        cand = f"{base_no}-R"
+        cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (cand,))
+        if cursor.fetchone():
+            r_idx = 2
+            while True:
+                cand = f"{base_no}-R{r_idx}"
+                cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (cand,))
+                if not cursor.fetchone():
+                    break
+                r_idx += 1
+        remainder_batch_no = cand
+
+        rm_qty_rem = None
+        if batch["quantity_total"] and batch["raw_material_quantity"]:
+            rm_qty_rem = round(batch["raw_material_quantity"] * pending_qty / batch["quantity_total"], 2)
+
+        cursor.execute("""
+        INSERT INTO batches (
+            batch_no, item_code, route_id, current_stage_sequence,
+            current_process, current_vendor_id, is_inhouse, quantity_total,
+            quantity_accepted, quantity_rejected, raw_material_code,
+            raw_material_quantity, raw_material_unit, status, is_critical,
+            date_started, date_sent_to_vendor, expected_delivery_date,
+            challan_no, notes
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """, (
+            remainder_batch_no, batch["item_code"], batch["route_id"],
+            curr_seq, batch["current_process"], batch["current_vendor_id"],
+            batch["is_inhouse"], pending_qty, pending_qty,
+            batch["raw_material_code"], rm_qty_rem, batch["raw_material_unit"],
+            batch["status"], batch["is_critical"],
+            batch["date_started"], batch["date_sent_to_vendor"],
+            batch["expected_delivery_date"], batch["challan_no"],
+            f"Pending balance from {batch['batch_no']} ({pending_qty} pcs pending at {batch['current_process']})"
+        ))
+        rem_id = cursor.fetchone()["id"]
+
+        cursor.execute("""
+        INSERT INTO batch_history (
+            batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
+            quantity_in, date_in, challan_out, remarks
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            rem_id, curr_seq, batch["current_process"],
+            batch["current_vendor_id"], batch["is_inhouse"],
+            pending_qty, batch["date_sent_to_vendor"] or today_str,
+            batch["challan_no"],
+            f"Pending balance from split advance of {batch['batch_no']}"
+        ))
+
+    # Log completion of current stage on the parent batch
+    stage_remarks = payload.remarks or f"Split advance from {batch['current_process']}"
+    stage_remarks += f" ({total_allocated} pcs split into {len(payload.allocations)} sub-lots"
+    if pending_qty > 0:
+        stage_remarks += f", {pending_qty} pcs pending as {remainder_batch_no}"
+    stage_remarks += ")"
+
+    cursor.execute("""
+    UPDATE batch_history
+    SET quantity_out = %s, quantity_rejected = %s, date_out = %s, remarks = %s
+    WHERE batch_id = %s AND stage_sequence = %s
+    """, (
+        total_allocated, rejected_qty,
+        today_str, stage_remarks,
+        batch_id, curr_seq
+    ))
+
+    # Fetch prior stage histories up to curr_seq for replicating lineage to child sub-batches
+    cursor.execute("""
+    SELECT stage_sequence, process_name, vendor_id, is_inhouse, quantity_in, quantity_out, quantity_rejected, date_in, date_out, challan_out, remarks
+    FROM batch_history
+    WHERE batch_id = %s AND stage_sequence <= %s
+    ORDER BY stage_sequence ASC
+    """, (batch_id, curr_seq))
+    prior_history_rows = cursor.fetchall() or []
+
+    # Map vendor names for response
+    cursor.execute("SELECT id, name FROM vendors")
+    vendor_map = {v["id"]: v["name"] for v in (cursor.fetchall() or [])}
+
+    sub_batches_info = []
+
+    def make_unique_sub_batch_no(base_str, suffix_letter):
+        cand_str = f"{base_str}-{suffix_letter}"
+        cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (cand_str,))
+        if not cursor.fetchone():
+            return cand_str
+        num = 2
+        while True:
+            cand_str = f"{base_str}-{suffix_letter}{num}"
+            cursor.execute("SELECT id FROM batches WHERE batch_no = %s", (cand_str,))
+            if not cursor.fetchone():
+                return cand_str
+            num += 1
+
+    base_batch_no = batch["batch_no"]
+
+    for idx, alloc in enumerate(payload.allocations):
+        alloc_qty = int(alloc.quantity)
+        alloc_inhouse = bool(alloc.is_inhouse) if alloc.is_inhouse is not None else False
+        alloc_vendor_id = None if alloc_inhouse else (alloc.vendor_id or (next_stage["vendor_id"] if next_stage else None))
+        alloc_lead_time = alloc.lead_time_days or (next_stage["lead_time_days"] if next_stage else 3)
+        alloc_exp_date = (today + timedelta(days=alloc_lead_time)).strftime("%Y-%m-%d")
+
+        if is_next_finished:
+            alloc_vendor_id = None
+            alloc_inhouse = True
+            alloc_status = "Completed"
+            alloc_exp_date = today_str
+            alloc_challan = None
+        else:
+            alloc_status = "In Process" if alloc_inhouse else "With Vendor"
+            alloc_challan = alloc.challan_no
+            if not alloc_inhouse and alloc_vendor_id and not alloc_challan:
+                time_suffix = datetime.now().strftime("%Y%m%d%H%M")
+                alloc_challan = f"DC-OUT-{time_suffix}-{chr(65 + idx)}"
+
+        # Proportional raw material
+        rm_qty_sub = None
+        if batch["quantity_total"] and batch["raw_material_quantity"]:
+            rm_qty_sub = round(batch["raw_material_quantity"] * alloc_qty / batch["quantity_total"], 2)
+
+        # Sub-batch name
+        if alloc.sub_batch_no and alloc.sub_batch_no.strip():
+            sub_b_no = alloc.sub_batch_no.strip()
+        elif len(payload.allocations) == 1:
+            sub_b_no = base_batch_no
+        else:
+            sub_b_no = make_unique_sub_batch_no(base_batch_no, chr(65 + idx))
+
+        vendor_display_name = "In-House Store" if alloc_inhouse else vendor_map.get(alloc_vendor_id, "External Vendor")
+
+        if idx == 0:
+            # Update the original batch record for Allocation 1
+            target_batch_id = batch_id
+            cursor.execute("""
+            UPDATE batches
+            SET batch_no = %s,
+                current_stage_sequence = %s,
+                current_process = %s,
+                current_vendor_id = %s,
+                is_inhouse = %s,
+                quantity_total = %s,
+                quantity_accepted = %s,
+                quantity_rejected = quantity_rejected + %s,
+                raw_material_quantity = %s,
+                status = %s,
+                date_sent_to_vendor = %s,
+                expected_delivery_date = %s,
+                challan_no = %s,
+                notes = %s
+            WHERE id = %s
+            """, (
+                sub_b_no, next_seq, next_process_name,
+                alloc_vendor_id, 1 if alloc_inhouse else 0,
+                alloc_qty, alloc_qty, rejected_qty,
+                rm_qty_sub, alloc_status, today_str,
+                alloc_exp_date, alloc_challan,
+                f"Split sub-lot from {base_batch_no} ({alloc_qty} pcs to {vendor_display_name})",
+                batch_id
+            ))
+
+            # Add batch history for next stage
+            cursor.execute("""
+            INSERT INTO batch_history (
+                batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
+                quantity_in, date_in, challan_out, remarks
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                batch_id, next_seq, next_process_name,
+                alloc_vendor_id, 1 if alloc_inhouse else 0,
+                alloc_qty, today_str, alloc_challan,
+                "Stage started via split allocation"
+            ))
+
+            # Delivery challan if outward to vendor
+            if not alloc_inhouse and alloc_vendor_id and alloc_challan:
+                cursor.execute("""
+                INSERT INTO delivery_challans (
+                    challan_no, challan_type, date, vendor_id, batch_id, item_code,
+                    process_name, quantity, remarks
+                ) VALUES (%s, 'Outward to Vendor', %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    alloc_challan, today_str, alloc_vendor_id, batch_id, batch["item_code"],
+                    next_process_name, alloc_qty,
+                    f"Dispatched sub-lot {sub_b_no} for {next_process_name}"
+                ))
+
+        else:
+            # Create NEW sub-batch record for subsequent allocations
+            cursor.execute("""
+            INSERT INTO batches (
+                batch_no, item_code, route_id, current_stage_sequence,
+                current_process, current_vendor_id, is_inhouse, quantity_total,
+                quantity_accepted, quantity_rejected, raw_material_code,
+                raw_material_quantity, raw_material_unit, status, is_critical,
+                date_started, date_sent_to_vendor, expected_delivery_date,
+                challan_no, notes
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """, (
+                sub_b_no, batch["item_code"], batch["route_id"],
+                next_seq, next_process_name, alloc_vendor_id,
+                1 if alloc_inhouse else 0, alloc_qty, alloc_qty,
+                batch["raw_material_code"], rm_qty_sub, batch["raw_material_unit"],
+                alloc_status, batch["is_critical"],
+                batch["date_started"], today_str, alloc_exp_date,
+                alloc_challan,
+                f"Split sub-lot from {base_batch_no} ({alloc_qty} pcs to {vendor_display_name})"
+            ))
+            target_batch_id = cursor.fetchone()["id"]
+
+            # Replicate prior stage history for full pedigree & audit trail
+            for h in prior_history_rows:
+                cursor.execute("""
+                INSERT INTO batch_history (
+                    batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
+                    quantity_in, quantity_out, quantity_rejected, date_in, date_out, challan_out, remarks
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    target_batch_id, h["stage_sequence"], h["process_name"],
+                    h["vendor_id"], h["is_inhouse"], alloc_qty,
+                    alloc_qty if h["quantity_out"] else None,
+                    0, h["date_in"], h["date_out"],
+                    h["challan_out"], f"Lineage from {base_batch_no}"
+                ))
+
+            # Add batch history for next stage
+            cursor.execute("""
+            INSERT INTO batch_history (
+                batch_id, stage_sequence, process_name, vendor_id, is_inhouse,
+                quantity_in, date_in, challan_out, remarks
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                target_batch_id, next_seq, next_process_name,
+                alloc_vendor_id, 1 if alloc_inhouse else 0,
+                alloc_qty, today_str, alloc_challan,
+                "Stage started via split allocation"
+            ))
+
+            # Delivery challan if outward to vendor
+            if not alloc_inhouse and alloc_vendor_id and alloc_challan:
+                cursor.execute("""
+                INSERT INTO delivery_challans (
+                    challan_no, challan_type, date, vendor_id, batch_id, item_code,
+                    process_name, quantity, remarks
+                ) VALUES (%s, 'Outward to Vendor', %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    alloc_challan, today_str, alloc_vendor_id, target_batch_id, batch["item_code"],
+                    next_process_name, alloc_qty,
+                    f"Dispatched sub-lot {sub_b_no} for {next_process_name}"
+                ))
+
+        sub_batches_info.append({
+            "batch_id": target_batch_id,
+            "batch_no": sub_b_no,
+            "quantity": alloc_qty,
+            "vendor_id": alloc_vendor_id,
+            "vendor_name": vendor_display_name,
+            "is_inhouse": alloc_inhouse,
+            "challan_no": alloc_challan,
+            "expected_delivery_date": alloc_exp_date
+        })
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "status": "Split Advanced",
+        "next_process": next_process_name,
+        "next_sequence": next_seq,
+        "total_dispatched": total_allocated,
+        "quantity_rejected": rejected_qty,
+        "remainder_batch_no": remainder_batch_no,
+        "pending_quantity": pending_qty if pending_qty > 0 else 0,
+        "sub_batches": sub_batches_info,
+        "message": f"Successfully split and advanced {total_allocated} pcs across {len(payload.allocations)} destinations!" + (f" ({pending_qty} pcs pending as {remainder_batch_no})" if remainder_batch_no else "")
+    }
+
 
 @app.post("/api/batches/{batch_id}/rework")
 def rework_batch(batch_id: int, payload: BatchRework):

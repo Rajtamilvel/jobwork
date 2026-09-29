@@ -101,6 +101,21 @@ class BatchAdvance(BaseModel):
     challan_no: Optional[str] = None
     remarks: Optional[str] = None
 
+class SplitAllocation(BaseModel):
+    quantity: int
+    vendor_id: Optional[int] = None
+    is_inhouse: Optional[bool] = False
+    sub_batch_no: Optional[str] = None
+    challan_no: Optional[str] = None
+    lead_time_days: Optional[int] = 3
+    notes: Optional[str] = None
+
+class BatchSplitAdvance(BaseModel):
+    quantity_rejected: Optional[int] = 0
+    allocations: List[SplitAllocation]
+    remarks: Optional[str] = None
+
+
 class BatchRework(BaseModel):
     target_stage_sequence: int
     quantity: int

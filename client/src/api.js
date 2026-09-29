@@ -83,6 +83,20 @@ export async function advanceBatch(batchId, data) {
   return res.json();
 }
 
+export async function splitAdvanceBatch(batchId, data) {
+  const res = await fetch(`${API_BASE}/batches/${batchId}/split-advance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to split and advance batch' }));
+    throw new Error(err.detail || 'Failed to split and advance batch');
+  }
+  return res.json();
+}
+
+
 export async function reworkBatch(batchId, data) {
   const res = await fetch(`${API_BASE}/batches/${batchId}/rework`, {
     method: 'POST',

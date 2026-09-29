@@ -611,7 +611,8 @@ def toggle_critical(batch_id: int):
         conn.close()
         raise HTTPException(status_code=404, detail="Batch not found")
         
-    new_val = 0 if row[0] else 1
+    crit_val = row.get("is_critical") if isinstance(row, dict) else row[0]
+    new_val = 0 if crit_val else 1
     cursor.execute("UPDATE batches SET is_critical = %s WHERE id = %s", (new_val, batch_id))
     conn.commit()
     conn.close()
@@ -1719,14 +1720,15 @@ def delete_vendor(vendor_id: int):
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Vendor not found")
-    vendor_name = row[0]
+    vendor_name = row.get("name") if isinstance(row, dict) else row[0]
     
     # Check if vendor has active batches
     cursor.execute("""
     SELECT COUNT(*) as count FROM batches 
     WHERE current_vendor_id = %s AND status = 'With Vendor'
     """, (vendor_id,))
-    active_count = cursor.fetchone()["count"]
+    count_row = cursor.fetchone()
+    active_count = (count_row.get("count") if isinstance(count_row, dict) else count_row[0]) if count_row else 0
     
     if active_count > 0:
         conn.close()
@@ -1735,11 +1737,24 @@ def delete_vendor(vendor_id: int):
             detail=f"Cannot remove '{vendor_name}' because they currently have {active_count} active items/batches in production! Please receive or move those items first."
         )
         
-    # Unlink from route stages
-    cursor.execute("UPDATE route_stages SET vendor_id = NULL, is_inhouse = 1 WHERE vendor_id = %s", (vendor_id,))
-    # Delete vendor
-    cursor.execute("DELETE FROM vendors WHERE id = %s", (vendor_id,))
-    conn.commit()
+    try:
+        # Unlink from route stages
+        cursor.execute("UPDATE route_stages SET vendor_id = NULL, is_inhouse = 1 WHERE vendor_id = %s", (vendor_id,))
+        # Unlink from batches (e.g. completed batches)
+        cursor.execute("UPDATE batches SET current_vendor_id = NULL WHERE current_vendor_id = %s", (vendor_id,))
+        # Unlink from delivery challans
+        cursor.execute("UPDATE delivery_challans SET vendor_id = NULL WHERE vendor_id = %s", (vendor_id,))
+        # Remove follow-ups
+        cursor.execute("DELETE FROM vendor_followups WHERE vendor_id = %s", (vendor_id,))
+        # Unlink from history
+        cursor.execute("UPDATE batch_history SET vendor_id = NULL WHERE vendor_id = %s", (vendor_id,))
+        # Delete vendor
+        cursor.execute("DELETE FROM vendors WHERE id = %s", (vendor_id,))
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Failed to delete vendor: {str(e)}")
+
     conn.close()
     return {"message": f"Vendor '{vendor_name}' removed successfully", "vendor_id": vendor_id}
 

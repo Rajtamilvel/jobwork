@@ -2479,6 +2479,7 @@ def get_items_stock_by_stage():
             "stages_pipeline": pipeline_stages,
             "finished_batches": finished_batches
         })
+
         
     conn.close()
     

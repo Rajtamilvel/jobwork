@@ -1,7 +1,9 @@
 import os
 import json
+import http.client
 import urllib.request
 import urllib.error
+from urllib.parse import urlparse
 from typing import Any, List, Optional
 # Try to load .env using dotenv or built-in file reader
 try:
@@ -94,35 +96,51 @@ class SupabaseHttpCursor:
 
 
 class SupabaseHttpConnection:
-    """Database connection that uses Supabase HTTPS API — no database password needed."""
+    """Database connection that uses Supabase HTTPS API with persistent Keep-Alive connection pooling."""
     def __init__(self, url: str, key: str):
-        self.url = url.rstrip("/")
+        parsed = urlparse(url.rstrip("/"))
+        self.host = parsed.netloc
+        self.path = f"{parsed.path}/rest/v1/rpc/exec_sql".replace("//", "/")
         self.key = key
+        self._http_conn = None
+
+    def _get_http_conn(self):
+        if self._http_conn is None:
+            self._http_conn = http.client.HTTPSConnection(self.host, timeout=15)
+        return self._http_conn
 
     def _run_rpc(self, sql: str) -> List[dict]:
-        rpc_url = f"{self.url}/rest/v1/rpc/exec_sql"
         body = json.dumps({"query": sql}).encode("utf-8")
-        req = urllib.request.Request(
-            rpc_url,
-            data=body,
-            headers={
-                "apikey": self.key,
-                "Authorization": f"Bearer {self.key}",
-                "Content-Type": "application/json"
-            }
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data if isinstance(data, list) else []
-        except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
-            if "exec_sql" in err_msg or e.code == 404:
-                raise RuntimeError(
-                    "Supabase RPC function 'exec_sql' not found in your Supabase project. "
-                    "Please run the helper SQL in Supabase SQL Editor."
-                ) from e
-            raise RuntimeError(f"Database error ({e.code}): {err_msg}") from e
+        headers = {
+            "apikey": self.key,
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": "application/json",
+            "Connection": "keep-alive"
+        }
+        for attempt in range(2):
+            try:
+                c = self._get_http_conn()
+                c.request("POST", self.path, body=body, headers=headers)
+                resp = c.getresponse()
+                raw_bytes = resp.read()
+                if resp.status == 200:
+                    data = json.loads(raw_bytes.decode("utf-8"))
+                    return data if isinstance(data, list) else []
+                else:
+                    err_msg = raw_bytes.decode("utf-8", errors="replace")
+                    if "exec_sql" in err_msg or resp.status == 404:
+                        raise RuntimeError(
+                            "Supabase RPC function 'exec_sql' not found in your Supabase project. "
+                            "Please run the helper SQL in Supabase SQL Editor."
+                        )
+                    raise RuntimeError(f"Database error ({resp.status}): {err_msg}")
+            except (http.client.RemoteDisconnected, http.client.CannotSendRequest, BrokenPipeError, ConnectionResetError):
+                self._http_conn = None
+                if attempt == 1:
+                    raise
+            except Exception:
+                self._http_conn = None
+                raise
 
     def cursor(self):
         return SupabaseHttpCursor(self)
@@ -134,7 +152,13 @@ class SupabaseHttpConnection:
         pass
 
     def close(self):
-        pass
+        if self._http_conn:
+            try:
+                self._http_conn.close()
+            except Exception:
+                pass
+            self._http_conn = None
+
 
 
 def get_db():

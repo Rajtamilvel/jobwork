@@ -308,23 +308,24 @@ def get_dashboard_overview():
     conn = get_db()
     cursor = get_cursor(conn)
     
-    # Summary counters
-    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE status != 'Completed'")
-    total_active_batches = cursor.fetchone()["count"]
-    
-    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE status = 'With Vendor'")
-    batches_with_vendors = cursor.fetchone()["count"]
-    
-    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE is_inhouse = 1 AND status != 'Completed'")
-    batches_inhouse = cursor.fetchone()["count"]
-    
-    cursor.execute("SELECT COUNT(*) as count FROM batches WHERE is_critical = 1 AND status != 'Completed'")
-    critical_batches_count = cursor.fetchone()["count"]
-    
-    cursor.execute("SELECT SUM(quantity_accepted) FROM batches WHERE status != 'Completed'")
-    total_pieces_in_progress = get_scalar(cursor, 0)
+    # 1. Combined summary counters in a single query
+    cursor.execute("""
+    SELECT 
+        COUNT(CASE WHEN status != 'Completed' THEN 1 END) as total_active_batches,
+        COUNT(CASE WHEN status = 'With Vendor' THEN 1 END) as batches_with_vendors,
+        COUNT(CASE WHEN is_inhouse = 1 AND status != 'Completed' THEN 1 END) as batches_inhouse,
+        COUNT(CASE WHEN is_critical = 1 AND status != 'Completed' THEN 1 END) as critical_batches_count,
+        COALESCE(SUM(CASE WHEN status != 'Completed' THEN quantity_accepted END), 0) as total_pieces_in_progress
+    FROM batches
+    """)
+    summary = cursor.fetchone() or {}
+    total_active_batches = summary.get("total_active_batches", 0)
+    batches_with_vendors = summary.get("batches_with_vendors", 0)
+    batches_inhouse = summary.get("batches_inhouse", 0)
+    critical_batches_count = summary.get("critical_batches_count", 0)
+    total_pieces_in_progress = summary.get("total_pieces_in_progress", 0)
 
-    # Detailed Batch Matrix
+    # 2. Detailed Batch Matrix with stage count and welding metadata joined (eliminates N+1 loop)
     cursor.execute("""
     SELECT 
         b.id, b.batch_no, b.item_code, i.name as item_name, i.drawing_no,
@@ -334,11 +335,19 @@ def get_dashboard_overview():
         b.is_inhouse, b.quantity_total, b.quantity_accepted, b.quantity_rejected,
         b.raw_material_code, b.raw_material_quantity, b.raw_material_unit,
         b.status, b.is_critical, b.date_started, b.date_sent_to_vendor,
-        b.expected_delivery_date, b.challan_no, b.notes
+        b.expected_delivery_date, b.challan_no, b.notes,
+        COALESCE(rs_meta.is_welding_stage, 0) as is_welding_stage,
+        COALESCE(stg_cnt.total_stages, 1) as total_stages
     FROM batches b
     JOIN items i ON b.item_code = i.item_code
     JOIN process_routes r ON b.route_id = r.id
     LEFT JOIN vendors v ON b.current_vendor_id = v.id
+    LEFT JOIN route_stages rs_meta ON rs_meta.route_id = b.route_id AND rs_meta.sequence_no = b.current_stage_sequence
+    LEFT JOIN (
+        SELECT route_id, COUNT(*) as total_stages 
+        FROM route_stages 
+        GROUP BY route_id
+    ) stg_cnt ON stg_cnt.route_id = b.route_id
     WHERE b.status != 'Completed' AND LOWER(b.current_process) != 'finished product'
     ORDER BY b.is_critical DESC, b.expected_delivery_date ASC
     """)
@@ -350,18 +359,6 @@ def get_dashboard_overview():
         lead_info = calculate_lead_status(row["date_sent_to_vendor"], row["expected_delivery_date"], row["status"])
         if lead_info["is_overdue"]:
             overdue_count += 1
-            
-        # Total stages in this route
-        cursor.execute("SELECT COUNT(*) as count FROM route_stages WHERE route_id = %s", (row["route_id"],))
-        total_stages = cursor.fetchone()["count"]
-        
-        # Check if current stage is welding stage
-        cursor.execute("""
-        SELECT is_welding_stage FROM route_stages 
-        WHERE route_id = %s AND sequence_no = %s
-        """, (row["route_id"], row["current_stage_sequence"]))
-        stage_meta = cursor.fetchone()
-        is_welding = bool(stage_meta.get("is_welding_stage")) if isinstance(stage_meta, dict) else (bool(stage_meta[0]) if stage_meta else False)
 
         batches.append({
             "id": row["id"],
@@ -372,7 +369,7 @@ def get_dashboard_overview():
             "route_id": row["route_id"],
             "route_name": row["route_name"],
             "current_stage_sequence": row["current_stage_sequence"],
-            "total_stages": total_stages,
+            "total_stages": row.get("total_stages", 1),
             "current_process": row["current_process"],
             "current_vendor_id": row["current_vendor_id"],
             "vendor_name": "In-House Shop" if row["is_inhouse"] else (row["vendor_name"] or "Unassigned"),
@@ -387,7 +384,7 @@ def get_dashboard_overview():
             "raw_material_unit": row["raw_material_unit"],
             "status": row["status"],
             "is_critical": bool(row["is_critical"]),
-            "is_welding_stage": is_welding,
+            "is_welding_stage": bool(row.get("is_welding_stage", 0)),
             "date_started": row["date_started"],
             "date_sent_to_vendor": row["date_sent_to_vendor"],
             "expected_delivery_date": row["expected_delivery_date"],
@@ -396,7 +393,7 @@ def get_dashboard_overview():
             "lead_status": lead_info
         })
 
-    # Vendor Loads Breakdown
+    # 3. Vendor Loads Breakdown
     cursor.execute("""
     SELECT 
         v.id, v.name, v.code, v.phone, v.processes_offered,
@@ -422,6 +419,7 @@ def get_dashboard_overview():
         "batches": batches,
         "vendor_loads": vendor_loads
     }
+
 
 # ==========================================
 # 2. BATCHES & PROCESS PROGRESSION
@@ -2242,43 +2240,52 @@ def get_vendor_stocks():
     """)
     vendors = [dict(r) for r in cursor.fetchall()]
     
+    # Bulk fetch all batches currently with vendors in a single query
+    cursor.execute("""
+    SELECT 
+        b.id, b.batch_no, b.item_code, i.name as item_name, i.drawing_no,
+        i.material_code, i.weight, COALESCE(i.raw_material_name, rm.name) as raw_material_name,
+        b.current_stage_sequence, b.current_process,
+        b.quantity_total, b.quantity_accepted, b.quantity_rejected,
+        b.date_sent_to_vendor, b.expected_delivery_date, b.challan_no,
+        b.is_critical, b.notes,
+        COALESCE(b.current_vendor_id, d_stage.vendor_id) as assigned_vendor_id
+    FROM batches b
+    JOIN items i ON b.item_code = i.item_code
+    LEFT JOIN raw_materials rm ON i.material_code = rm.code
+    LEFT JOIN (
+        SELECT pr.item_code, rs.sequence_no, rs.vendor_id
+        FROM route_stages rs
+        JOIN process_routes pr ON rs.route_id = pr.id
+        WHERE pr.is_default = 1
+    ) d_stage ON d_stage.item_code = b.item_code AND d_stage.sequence_no = b.current_stage_sequence
+    WHERE b.status = 'With Vendor'
+      AND b.quantity_accepted > 0
+    ORDER BY b.is_critical DESC, b.expected_delivery_date ASC
+    """)
+    
+    vendor_batches_map = {}
+    for brow in cursor.fetchall():
+        vid = brow.get("assigned_vendor_id")
+        if vid:
+            vendor_batches_map.setdefault(vid, []).append(brow)
+
     results = []
     for v in vendors:
-        cursor.execute("""
-        SELECT 
-            b.id, b.batch_no, b.item_code, i.name as item_name, i.drawing_no,
-            i.material_code, i.weight, COALESCE(i.raw_material_name, rm.name) as raw_material_name,
-            b.current_stage_sequence, b.current_process,
-            b.quantity_total, b.quantity_accepted, b.quantity_rejected,
-            b.date_sent_to_vendor, b.expected_delivery_date, b.challan_no,
-            b.is_critical, b.notes
-        FROM batches b
-        JOIN items i ON b.item_code = i.item_code
-        LEFT JOIN raw_materials rm ON i.material_code = rm.code
-        LEFT JOIN (
-            SELECT pr.item_code, rs.sequence_no, rs.vendor_id
-            FROM route_stages rs
-            JOIN process_routes pr ON rs.route_id = pr.id
-            WHERE pr.is_default = 1
-        ) d_stage ON d_stage.item_code = b.item_code AND d_stage.sequence_no = b.current_stage_sequence
-        WHERE (b.current_vendor_id = %s OR (b.current_vendor_id IS NULL AND b.is_inhouse = 0 AND d_stage.vendor_id = %s))
-          AND b.status = 'With Vendor'
-          AND b.quantity_accepted > 0
-        ORDER BY b.is_critical DESC, b.expected_delivery_date ASC
-        """, (v["id"], v["id"]))
-        
+        batch_rows = vendor_batches_map.get(v["id"], [])
         items_at_vendor = []
         total_qty = 0
         overdue_items = 0
         critical_items = 0
         
-        for row in cursor.fetchall():
+        for row in batch_rows:
             lead_info = calculate_lead_status(row["date_sent_to_vendor"], row["expected_delivery_date"], "With Vendor")
             if lead_info["is_overdue"]:
                 overdue_items += 1
             if row["is_critical"]:
                 critical_items += 1
             total_qty += row["quantity_accepted"]
+
             
             items_at_vendor.append({
                 "id": row["id"],
@@ -2349,6 +2356,39 @@ def get_items_stock_by_stage():
     """)
     items_rows = [dict(r) for r in cursor.fetchall()]
     
+    # Bulk fetch default route stages for all items in 1 query
+    cursor.execute("""
+    SELECT 
+        pr.item_code, pr.id as route_id, pr.route_name,
+        rs.id, rs.id as stage_id, rs.sequence_no, rs.process_name, rs.vendor_id, v.name as default_vendor_name,
+        rs.is_inhouse, rs.lead_time_days, rs.is_welding_stage, rs.notes
+    FROM process_routes pr
+    JOIN route_stages rs ON pr.id = rs.route_id
+    LEFT JOIN vendors v ON rs.vendor_id = v.id
+    WHERE pr.is_default = 1
+    ORDER BY pr.item_code, rs.sequence_no ASC
+    """)
+    stages_by_item = {}
+    for srow in cursor.fetchall():
+        sdict = dict(srow)
+        stages_by_item.setdefault(sdict["item_code"], []).append(sdict)
+
+    # Bulk fetch all batches for all items in 1 query
+    cursor.execute("""
+    SELECT 
+        b.id, b.batch_no, b.item_code, b.current_stage_sequence, b.current_process,
+        b.current_vendor_id, v.name as vendor_name, v.contact_person as vendor_contact, v.phone as vendor_phone,
+        b.is_inhouse, b.quantity_total, b.quantity_accepted, b.quantity_rejected,
+        b.status, b.is_critical, b.date_started, b.date_sent_to_vendor,
+        b.expected_delivery_date, b.challan_no, b.notes
+    FROM batches b
+    LEFT JOIN vendors v ON b.current_vendor_id = v.id
+    ORDER BY b.is_critical DESC, b.current_stage_sequence ASC, b.id ASC
+    """)
+    batches_by_item = {}
+    for brow in cursor.fetchall():
+        batches_by_item.setdefault(brow["item_code"], []).append(brow)
+
     total_wip_all = 0
     total_finished_all = 0
     total_overdue_all = 0
@@ -2357,45 +2397,12 @@ def get_items_stock_by_stage():
     
     for item in items_rows:
         code = item["item_code"]
-        
-        # Get active default route for this item
-        cursor.execute("""
-        SELECT id, route_name FROM process_routes 
-        WHERE item_code = %s 
-        ORDER BY is_default DESC, id ASC LIMIT 1
-        """, (code,))
-        route = cursor.fetchone()
-        
-        stages = []
-        if route:
-            cursor.execute("""
-            SELECT 
-                rs.id, rs.sequence_no, rs.process_name, rs.vendor_id, v.name as default_vendor_name,
-                rs.is_inhouse, rs.lead_time_days, rs.is_welding_stage, rs.notes
-            FROM route_stages rs
-            LEFT JOIN vendors v ON rs.vendor_id = v.id
-            WHERE rs.route_id = %s
-            ORDER BY rs.sequence_no ASC
-            """, (route["id"],))
-            stages = [dict(s) for s in cursor.fetchall()]
-            
-        # Get all batches for this item
-        cursor.execute("""
-        SELECT 
-            b.id, b.batch_no, b.item_code, b.current_stage_sequence, b.current_process,
-            b.current_vendor_id, v.name as vendor_name, v.contact_person as vendor_contact, v.phone as vendor_phone,
-            b.is_inhouse, b.quantity_total, b.quantity_accepted, b.quantity_rejected,
-            b.status, b.is_critical, b.date_started, b.date_sent_to_vendor,
-            b.expected_delivery_date, b.challan_no, b.notes
-        FROM batches b
-        LEFT JOIN vendors v ON b.current_vendor_id = v.id
-        WHERE b.item_code = %s
-        ORDER BY b.is_critical DESC, b.current_stage_sequence ASC, b.id ASC
-        """, (code,))
-        all_batches = cursor.fetchall()
+        stages = stages_by_item.get(code, [])
+        all_batches = batches_by_item.get(code, [])
         
         item_wip = 0
         item_finished = 0
+
         item_rejected = 0
         item_overdue = 0
         
@@ -2463,7 +2470,7 @@ def get_items_stock_by_stage():
             
         items_stock_list.append({
             **item,
-            "route_name": route["route_name"] if route else None,
+            "route_name": stages[0]["route_name"] if stages else None,
             "total_wip_quantity": item_wip,
             "total_finished_quantity": item_finished,
             "total_rejected_quantity": item_rejected,

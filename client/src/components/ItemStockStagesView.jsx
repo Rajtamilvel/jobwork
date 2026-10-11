@@ -254,132 +254,150 @@ export default function ItemStockStagesView({
         </div>
       </div>
 
-      {/* ─── 2. HIGH-LEVEL KPI METRICS BAR ─────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-        <div className="bg-slate-900/90 border border-slate-800/90 rounded-xl p-2.5 sm:p-3 shadow-sm">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-medium">Finished in Store</span>
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-          </div>
-          <div className="text-xl font-extrabold text-emerald-400 font-mono mt-0.5">
-            {summary.total_finished_quantity.toLocaleString()} <span className="text-[11px] font-sans text-slate-400 font-normal">pcs</span>
-          </div>
-          <div className="text-[10px] text-slate-400 truncate">Ready for assembly & dispatch</div>
-        </div>
-
-        <div className="bg-slate-900/90 border border-slate-800/90 rounded-xl p-2.5 sm:p-3 shadow-sm">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-medium">Stock with Vendors</span>
-            <Truck className="w-3.5 h-3.5 text-amber-400" />
-          </div>
-          <div className="text-xl font-extrabold text-amber-400 font-mono mt-0.5">
-            {summary.total_wip_quantity.toLocaleString()} <span className="text-[11px] font-sans text-slate-400 font-normal">pcs</span>
-          </div>
-          <div className="text-[10px] text-amber-300/80 truncate font-medium">
-            Across {totalVendorHoldingsCount} subcontracted items
+      {/* ─── 2. HIGH-LEVEL KPI METRICS BAR (Double-Bezel) ─────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bezel-outer">
+          <div className="bezel-inner p-3.5 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-400">
+              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Finished in Store</span>
+              <div className="w-6 h-6 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+              </div>
+            </div>
+            <div className="text-xl sm:text-2xl font-extrabold text-emerald-400 font-mono mt-1">
+              {summary.total_finished_quantity.toLocaleString()} <span className="text-[10px] font-sans text-slate-400 font-normal">pcs</span>
+            </div>
+            <div className="text-[10px] text-slate-400 truncate mt-0.5">Ready for dispatch</div>
           </div>
         </div>
 
-        <div className="bg-slate-900/90 border border-slate-800/90 rounded-xl p-2.5 sm:p-3 shadow-sm">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-medium">Total Pipeline Stock</span>
-            <Package className="w-3.5 h-3.5 text-cyan-400" />
+        <div className="bezel-outer">
+          <div className="bezel-inner p-3.5 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-400">
+              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Stock with Vendors</span>
+              <div className="w-6 h-6 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                <Truck className="w-3.5 h-3.5" />
+              </div>
+            </div>
+            <div className="text-xl sm:text-2xl font-extrabold text-amber-400 font-mono mt-1">
+              {summary.total_wip_quantity.toLocaleString()} <span className="text-[10px] font-sans text-slate-400 font-normal">pcs</span>
+            </div>
+            <div className="text-[10px] text-amber-300/80 truncate mt-0.5 font-medium">
+              Across {totalVendorHoldingsCount} subcontracted items
+            </div>
           </div>
-          <div className="text-xl font-extrabold text-cyan-400 font-mono mt-0.5">
-            {(summary.total_finished_quantity + summary.total_wip_quantity).toLocaleString()} <span className="text-[11px] font-sans text-slate-400 font-normal">pcs</span>
-          </div>
-          <div className="text-[10px] text-slate-400 truncate">Finished goods + active WIP</div>
         </div>
 
-        <div className="bg-slate-900/90 border border-slate-800/90 rounded-xl p-2.5 sm:p-3 shadow-sm">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-medium">Overdue at Vendors</span>
-            <AlertTriangle className={`w-3.5 h-3.5 ${summary.total_overdue_batches > 0 ? 'text-red-400' : 'text-slate-500'}`} />
+        <div className="bezel-outer">
+          <div className="bezel-inner p-3.5 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-slate-400">
+              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">Total Pipeline Stock</span>
+              <div className="w-6 h-6 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
+                <Package className="w-3.5 h-3.5" />
+              </div>
+            </div>
+            <div className="text-xl sm:text-2xl font-extrabold text-cyan-300 font-mono mt-1">
+              {(summary.total_finished_quantity + summary.total_wip_quantity).toLocaleString()} <span className="text-[10px] font-sans text-slate-400 font-normal">pcs</span>
+            </div>
+            <div className="text-[10px] text-slate-400 truncate mt-0.5">Store goods + active WIP</div>
           </div>
-          <div className={`text-xl font-extrabold font-mono mt-0.5 ${summary.total_overdue_batches > 0 ? 'text-red-400' : 'text-slate-400'}`}>
-            {summary.total_overdue_batches} <span className="text-[11px] font-sans text-slate-400 font-normal">batches</span>
+        </div>
+
+        <div className={`bezel-outer ${summary.total_overdue_batches > 0 ? 'ring-1 ring-rose-500/40' : ''}`}>
+          <div className={`bezel-inner p-3.5 flex flex-col justify-between ${summary.total_overdue_batches > 0 ? 'bg-gradient-to-b from-rose-950/30 to-[#0f1526]' : ''}`}>
+            <div className="flex items-center justify-between text-slate-400">
+              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-rose-400">Overdue at Vendors</span>
+              <div className="w-6 h-6 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
+                <AlertTriangle className={`w-3.5 h-3.5 ${summary.total_overdue_batches > 0 ? 'text-rose-400' : 'text-slate-500'}`} />
+              </div>
+            </div>
+            <div className={`text-xl sm:text-2xl font-extrabold font-mono mt-1 ${summary.total_overdue_batches > 0 ? 'text-rose-400' : 'text-slate-400'}`}>
+              {summary.total_overdue_batches} <span className="text-[10px] font-sans text-slate-400 font-normal">batches</span>
+            </div>
+            <div className="text-[10px] text-slate-400 truncate mt-0.5">Requires vendor follow-up</div>
           </div>
-          <div className="text-[10px] text-slate-400 truncate">Requires vendor follow-up</div>
         </div>
       </div>
 
       {/* ─── 3. SEARCH & FILTER CONTROLS ───────────────────────────────────── */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-2 bg-slate-900/80 p-2 rounded-xl border border-slate-800">
-        <div className="relative w-full sm:w-80">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search by Item Code, Name, Material, or Vendor..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-8 pr-3 py-1 text-xs bg-slate-950 text-white rounded-lg border border-slate-800 focus:outline-none focus:border-cyan-500 placeholder-slate-500"
-          />
-        </div>
+      <div className="bezel-outer">
+        <div className="bezel-inner p-2.5 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="relative w-full sm:w-80">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search by Item Code, Name, Material, or Vendor..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 text-xs bg-black/30 text-white rounded-xl border border-white/[0.08] focus:outline-none focus:border-cyan-500/60 placeholder-slate-500 transition-colors font-mono"
+            />
+          </div>
 
-        <div className="flex items-center gap-1.5 flex-wrap w-full sm:w-auto justify-end">
-          <button
-            onClick={() => setFilterMode('all')}
-            className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-              filterMode === 'all'
-                ? 'bg-cyan-600 text-white shadow-sm'
-                : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-            }`}
-          >
-            All Items ({items.length})
-          </button>
+          <div className="flex items-center gap-1.5 flex-wrap w-full sm:w-auto justify-end">
+            <button
+              onClick={() => setFilterMode('all')}
+              className={`btn-machined px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                filterMode === 'all'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/10'
+                  : 'bg-black/20 text-slate-400 hover:text-white border border-white/[0.06]'
+              }`}
+            >
+              All Items ({items.length})
+            </button>
 
-          <button
-            onClick={() => setFilterMode('with-vendor')}
-            className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-              filterMode === 'with-vendor'
-                ? 'bg-amber-600 text-white shadow-sm'
-                : 'bg-slate-950 text-slate-400 hover:text-amber-300 border border-slate-800'
-            }`}
-          >
-            <Truck className="w-3 h-3 text-amber-400" />
-            <span>With Vendors ({totalVendorHoldingsCount})</span>
-          </button>
+            <button
+              onClick={() => setFilterMode('with-vendor')}
+              className={`btn-machined px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                filterMode === 'with-vendor'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm shadow-amber-500/10'
+                  : 'bg-black/20 text-slate-400 hover:text-amber-300 border border-white/[0.06]'
+              }`}
+            >
+              <Truck className="w-3 h-3 text-amber-400" />
+              <span>With Vendors ({totalVendorHoldingsCount})</span>
+            </button>
 
-          <button
-            onClick={() => setFilterMode('finished-only')}
-            className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-              filterMode === 'finished-only'
-                ? 'bg-emerald-600 text-white shadow-sm'
-                : 'bg-slate-950 text-slate-400 hover:text-emerald-300 border border-slate-800'
-            }`}
-          >
-            In Store
-          </button>
+            <button
+              onClick={() => setFilterMode('finished-only')}
+              className={`btn-machined px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                filterMode === 'finished-only'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-500/10'
+                  : 'bg-black/20 text-slate-400 hover:text-emerald-300 border border-white/[0.06]'
+              }`}
+            >
+              In Store
+            </button>
 
-          <button
-            onClick={() => setFilterMode('overdue')}
-            className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1 ${
-              filterMode === 'overdue'
-                ? 'bg-red-600 text-white shadow-sm'
-                : 'bg-slate-950 text-slate-400 hover:text-red-300 border border-slate-800'
-            }`}
-          >
-            <AlertTriangle className="w-3 h-3 text-red-400" />
-            <span>Overdue ({summary.total_overdue_batches})</span>
-          </button>
+            <button
+              onClick={() => setFilterMode('overdue')}
+              className={`btn-machined px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                filterMode === 'overdue'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-500/10'
+                  : 'bg-black/20 text-slate-400 hover:text-rose-300 border border-white/[0.06]'
+              }`}
+            >
+              <AlertTriangle className="w-3 h-3 text-rose-400" />
+              <span>Overdue ({summary.total_overdue_batches})</span>
+            </button>
 
-          <div className="h-3.5 w-px bg-slate-800 mx-0.5 hidden sm:block" />
+            <div className="h-4 w-px bg-white/[0.08] mx-1 hidden sm:block" />
 
-          <button
-            onClick={() => toggleExpandAll(true)}
-            className="px-2 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-cyan-300 bg-slate-950 hover:bg-slate-800 border border-slate-800 cursor-pointer"
-            title="Expand all items"
-          >
-            Expand All
-          </button>
+            <button
+              onClick={() => toggleExpandAll(true)}
+              className="btn-machined px-2.5 py-1.5 rounded-xl text-[11px] font-medium text-slate-400 hover:text-cyan-300 bg-black/20 hover:bg-white/[0.04] border border-white/[0.06] cursor-pointer"
+              title="Expand all items"
+            >
+              Expand All
+            </button>
 
-          <button
-            onClick={() => toggleExpandAll(false)}
-            className="px-2 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-slate-200 bg-slate-950 hover:bg-slate-800 border border-slate-800 cursor-pointer"
-            title="Collapse all items"
-          >
-            Collapse All
-          </button>
+            <button
+              onClick={() => toggleExpandAll(false)}
+              className="btn-machined px-2.5 py-1.5 rounded-xl text-[11px] font-medium text-slate-400 hover:text-slate-200 bg-black/20 hover:bg-white/[0.04] border border-white/[0.06] cursor-pointer"
+              title="Collapse all items"
+            >
+              Collapse All
+            </button>
+          </div>
         </div>
       </div>
 

@@ -120,7 +120,12 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-cyan-500 selection:text-white">
+    <div className="min-h-screen bg-[#06080f] text-slate-100 flex flex-col relative overflow-x-hidden selection:bg-cyan-500 selection:text-slate-950 font-sans">
+      
+      {/* Ambient Atmospheric Mesh Lighting */}
+      <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[1200px] h-[360px] bg-gradient-to-b from-cyan-600/[0.08] via-indigo-600/[0.04] to-transparent blur-3xl pointer-events-none -z-10" />
+      <div className="fixed top-1/3 -left-48 w-[500px] h-[500px] bg-blue-600/[0.03] blur-[120px] pointer-events-none -z-10" />
+      <div className="fixed bottom-0 -right-48 w-[600px] h-[500px] bg-cyan-600/[0.03] blur-[140px] pointer-events-none -z-10" />
       
       {/* Top Header */}
       <Header
@@ -138,23 +143,37 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 lg:px-8 py-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 lg:px-8 py-7">
         {loading && !data ? (
-          <div className="flex flex-col items-center justify-center py-24 space-y-4">
-            <div className="w-10 h-10 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
-            <p className="text-sm font-medium text-slate-400">Loading Jobwork Engineer Command Center...</p>
+          <div className="flex flex-col items-center justify-center py-32 space-y-5">
+            <div className="relative flex items-center justify-center">
+              <div className="w-14 h-14 rounded-full border-2 border-cyan-500/20 border-t-cyan-400 animate-spin"></div>
+              <div className="absolute w-8 h-8 rounded-full border-2 border-indigo-500/20 border-b-indigo-400 animate-spin [animation-direction:reverse]"></div>
+              <div className="w-2.5 h-2.5 bg-cyan-400 rounded-full shadow-[0_0_12px_#22d3ee]"></div>
+            </div>
+            <div className="text-center space-y-1">
+              <p className="text-xs font-bold uppercase tracking-widest text-cyan-400">RAJTAMIL ENGINEER OS</p>
+              <p className="text-xs text-slate-400 font-medium">Synchronizing shopfloor telemetry & vendor pipelines...</p>
+            </div>
           </div>
         ) : error ? (
-          <div className="p-6 bg-red-950/50 border border-red-500/50 rounded-xl text-center space-y-3 max-w-lg mx-auto my-12">
-            <h2 className="text-base font-bold text-red-300">Connection Error</h2>
-            <p className="text-xs text-red-200">{error}</p>
-            <p className="text-xs text-slate-400">Please verify backend server status on port 8000.</p>
-            <button
-              onClick={loadData}
-              className="px-4 py-2 bg-red-800 hover:bg-red-700 text-white rounded-lg text-xs font-semibold"
-            >
-              Retry Connection
-            </button>
+          <div className="bezel-outer max-w-lg mx-auto my-16">
+            <div className="bezel-inner p-6 text-center space-y-4">
+              <div className="w-10 h-10 mx-auto rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 font-bold">
+                !
+              </div>
+              <div>
+                <h2 className="text-sm font-bold text-rose-300 uppercase tracking-wide">Workstation Connection Alert</h2>
+                <p className="text-xs text-slate-300 mt-1 leading-relaxed">{error}</p>
+                <p className="text-[11px] text-slate-500 mt-1">Verify backend API status or network reachability.</p>
+              </div>
+              <button
+                onClick={loadData}
+                className="btn-machined px-5 py-2.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 rounded-xl text-xs font-semibold shadow-sm cursor-pointer"
+              >
+                Retry Telemetry Stream
+              </button>
+            </div>
           </div>
         ) : (
           <>

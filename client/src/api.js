@@ -419,6 +419,19 @@ export async function assignAssemblyBOMItem(assemblyId, data) {
   return res.json();
 }
 
+export async function assignAssemblyBOMBulk(assemblyId, items) {
+  const res = await fetch(`${API_BASE}/assemblies/${assemblyId}/bom/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items })
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to assign items to assembly' }));
+    throw new Error(err.detail || 'Failed to assign items to assembly');
+  }
+  return res.json();
+}
+
 export async function removeAssemblyBOMItem(assemblyId, bomId) {
   const res = await fetch(`${API_BASE}/assemblies/${assemblyId}/bom/${bomId}`, {
     method: 'DELETE'

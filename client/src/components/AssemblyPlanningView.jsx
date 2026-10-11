@@ -3,11 +3,11 @@ import {
   Boxes, Calendar, ChevronLeft, ChevronRight, Plus, Trash2,
   Wand2, Save, AlertTriangle, CheckCircle2, ShieldAlert,
   ArrowRight, Info, Layers, RefreshCw, X, Edit3, Cpu, Sparkles,
-  Target, CheckCheck, Activity, SlidersHorizontal
+  Target, CheckCheck, Activity, SlidersHorizontal, Search, CheckSquare, Square
 } from 'lucide-react';
 import {
   fetchAssemblies, createAssembly, deleteAssembly,
-  assignAssemblyBOMItem, removeAssemblyBOMItem,
+  assignAssemblyBOMItem, assignAssemblyBOMBulk, removeAssemblyBOMItem,
   fetchProductionPlans, saveMonthlyTargets, saveDailySchedule,
   fetchDailyConsumption, fetchItems
 } from '../api';
@@ -44,12 +44,11 @@ export default function AssemblyPlanningView() {
     drawing_no: ''
   });
 
-  const [assignItemForm, setAssignItemForm] = useState({
-    item_code: '',
-    consumption_qty: 1,
-    unit: 'pcs',
-    notes: ''
-  });
+  // Multi-Item BOM Assignment states
+  const [multiBOMSelection, setMultiBOMSelection] = useState({}); // { [item_code]: { selected: boolean, consumption_qty: number, unit: string, notes: string, is_existing: boolean } }
+  const [bomSearchTerm, setBomSearchTerm] = useState('');
+  const [bomFilterTab, setBomFilterTab] = useState('all'); // 'all', 'selected', 'unassigned'
+  const [bulkQtyInput, setBulkQtyInput] = useState(1);
 
   // Local editable state for daily plan inputs
   // editableSchedule[assembly_id][date] = planned_qty
@@ -248,24 +247,133 @@ export default function AssemblyPlanningView() {
     }
   }
 
-  // Handle Assign Component Item to Assembly
-  async function handleAssignItem(e) {
-    e.preventDefault();
+  // Open Multi-Item BOM Assignment Modal
+  function handleOpenAssignModal(asm) {
+    const initialSelection = {};
+    if (asm.bom_items && Array.isArray(asm.bom_items)) {
+      asm.bom_items.forEach(b => {
+        initialSelection[b.item_code] = {
+          selected: true,
+          consumption_qty: b.consumption_qty ?? 1,
+          unit: b.unit || 'pcs',
+          notes: b.notes || '',
+          is_existing: true
+        };
+      });
+    }
+    setMultiBOMSelection(initialSelection);
+    setBomSearchTerm('');
+    setBomFilterTab('all');
+    setBulkQtyInput(1);
+    setShowAssignItemModal(asm);
+  }
+
+  // Toggle selection for an item
+  function toggleItemSelection(itemCode) {
+    setMultiBOMSelection(prev => {
+      const current = prev[itemCode] || { consumption_qty: 1, unit: 'pcs', notes: '', selected: false };
+      return {
+        ...prev,
+        [itemCode]: {
+          ...current,
+          selected: !current.selected
+        }
+      };
+    });
+  }
+
+  // Update item consumption quantity
+  function updateItemQty(itemCode, qty) {
+    setMultiBOMSelection(prev => {
+      const current = prev[itemCode] || { unit: 'pcs', notes: '', selected: true };
+      return {
+        ...prev,
+        [itemCode]: {
+          ...current,
+          consumption_qty: qty,
+          selected: true // automatically select if user types a quantity
+        }
+      };
+    });
+  }
+
+  // Update item notes
+  function updateItemNotes(itemCode, notes) {
+    setMultiBOMSelection(prev => {
+      const current = prev[itemCode] || { consumption_qty: 1, unit: 'pcs', selected: true };
+      return {
+        ...prev,
+        [itemCode]: {
+          ...current,
+          notes: notes
+        }
+      };
+    });
+  }
+
+  // Apply a bulk quantity to all selected items
+  function applyBulkQtyToSelected() {
+    const targetQty = Math.max(0.01, Number(bulkQtyInput) || 1);
+    setMultiBOMSelection(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(code => {
+        if (next[code]?.selected) {
+          next[code] = {
+            ...next[code],
+            consumption_qty: targetQty
+          };
+        }
+      });
+      return next;
+    });
+  }
+
+  // Select all or deselect all filtered items
+  function selectAllFilteredItems(select = true, filteredList = []) {
+    setMultiBOMSelection(prev => {
+      const next = { ...prev };
+      filteredList.forEach(itm => {
+        const cur = next[itm.item_code] || { consumption_qty: 1, unit: 'pcs', notes: '' };
+        next[itm.item_code] = {
+          ...cur,
+          selected: select
+        };
+      });
+      return next;
+    });
+  }
+
+  // Handle Bulk Assign to Assembly BOM
+  async function handleBulkAssignBOM(e) {
+    if (e) e.preventDefault();
     if (!showAssignItemModal) return;
+
+    const itemsToAssign = Object.entries(multiBOMSelection)
+      .filter(([_, data]) => data.selected)
+      .map(([code, data]) => ({
+        item_code: code,
+        consumption_qty: Math.max(0.001, Number(data.consumption_qty) || 1),
+        unit: data.unit || 'pcs',
+        notes: data.notes || null
+      }));
+
+    if (itemsToAssign.length === 0) {
+      alert('Please check at least 1 manufactured item to assign to this assembly BOM.');
+      return;
+    }
+
     try {
       setSaving(true);
-      await assignAssemblyBOMItem(showAssignItemModal.id, {
-        item_code: assignItemForm.item_code,
-        consumption_qty: Number(assignItemForm.consumption_qty) || 1,
-        unit: assignItemForm.unit || 'pcs',
-        notes: assignItemForm.notes
-      });
+      await assignAssemblyBOMBulk(showAssignItemModal.id, itemsToAssign);
       setShowAssignItemModal(null);
-      setAssignItemForm({ item_code: '', consumption_qty: 1, unit: 'pcs', notes: '' });
-      setMessage({ type: 'success', text: 'Item assigned to assembly BOM!' });
+      setMessage({
+        type: 'success',
+        text: `Successfully mapped ${itemsToAssign.length} items to ${showAssignItemModal.assembly_code} BOM!`
+      });
       await loadAllData();
     } catch (err) {
-      alert(err.message || 'Failed to assign item');
+      console.error(err);
+      alert(err.message || 'Failed to assign items to assembly BOM');
     } finally {
       setSaving(false);
       setTimeout(() => setMessage(null), 4000);
@@ -1202,12 +1310,12 @@ export default function AssemblyPlanningView() {
 
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setShowAssignItemModal(asm)}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-700/60 text-xs font-semibold transition-colors cursor-pointer"
-                        title="Assign processed item to this assembly"
+                        onClick={() => handleOpenAssignModal(asm)}
+                        className="btn-machined flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-500/40 text-xs font-bold transition-all cursor-pointer shadow-sm shadow-cyan-950/30"
+                        title="Assign multiple manufactured component items to this assembly BOM"
                       >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Assign Item</span>
+                        <Plus className="w-3.5 h-3.5 text-cyan-400 stroke-[2.5]" />
+                        <span>Assign Items (BOM)</span>
                       </button>
 
                       <button
@@ -1231,10 +1339,10 @@ export default function AssemblyPlanningView() {
                       <div className="py-6 text-center text-slate-500 text-xs bg-slate-950/60 rounded-xl border border-dashed border-slate-800 space-y-1">
                         <p>No components assigned to this assembly yet.</p>
                         <button
-                          onClick={() => setShowAssignItemModal(asm)}
+                          onClick={() => handleOpenAssignModal(asm)}
                           className="text-cyan-400 hover:underline font-semibold"
                         >
-                          + Assign first item (e.g. CM001, CM002)
+                          + Select & assign multiple component items
                         </button>
                       </div>
                     ) : (
@@ -1457,98 +1565,355 @@ export default function AssemblyPlanningView() {
         </div>
       )}
 
-      {/* ─── MODAL 3: ASSIGN COMPONENT ITEM TO ASSEMBLY ──────────────────────── */}
-      {showAssignItemModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="text-base font-extrabold text-white">Assign Component Item</h3>
-                <p className="text-xs text-cyan-400 font-semibold">Assembly: {showAssignItemModal.assembly_code}</p>
+      {/* ─── MODAL 3: MULTI-ITEM ASSIGNMENT TO ASSEMBLY BOM ─────────────────── */}
+      {showAssignItemModal && (() => {
+        const existingMap = {};
+        (showAssignItemModal.bom_items || []).forEach(b => {
+          existingMap[b.item_code] = b;
+        });
+
+        const selectedCodes = Object.keys(multiBOMSelection).filter(c => multiBOMSelection[c]?.selected);
+        const selectedCount = selectedCodes.length;
+
+        const filteredList = masterItems.filter(itm => {
+          const term = bomSearchTerm.toLowerCase().trim();
+          const match = !term ||
+            itm.item_code?.toLowerCase().includes(term) ||
+            itm.name?.toLowerCase().includes(term) ||
+            itm.drawing_no?.toLowerCase().includes(term) ||
+            itm.raw_material_code?.toLowerCase().includes(term);
+
+          if (!match) return false;
+
+          const isSelected = Boolean(multiBOMSelection[itm.item_code]?.selected);
+          const isExisting = Boolean(existingMap[itm.item_code]);
+
+          if (bomFilterTab === 'selected') return isSelected;
+          if (bomFilterTab === 'unassigned') return !isExisting && !isSelected;
+          return true;
+        });
+
+        const isAllFilteredSelected = filteredList.length > 0 && filteredList.every(i => multiBOMSelection[i.item_code]?.selected);
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md">
+            <div className="bezel-outer max-w-3xl w-full shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+              <div className="bezel-inner p-5 sm:p-6 space-y-4 max-h-[92vh] flex flex-col">
+                
+                {/* 1. Header */}
+                <div className="flex items-start justify-between border-b border-white/[0.08] pb-3.5 shrink-0">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-extrabold text-white tracking-tight">
+                        Assign Component Items to BOM
+                      </h3>
+                      <span className="px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-300 border border-cyan-500/30 text-[10px] font-mono font-bold">
+                        MULTI-SELECT
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap mt-1">
+                      <span className="text-xs font-mono font-bold text-cyan-400">
+                        Assembly: {showAssignItemModal.assembly_code}
+                      </span>
+                      {showAssignItemModal.name && (
+                        <span className="text-xs text-slate-300 font-medium">
+                          • {showAssignItemModal.name}
+                        </span>
+                      )}
+                      <span className="text-[11px] text-slate-400 font-mono">
+                        ({showAssignItemModal.bom_items?.length || 0} existing parts in BOM)
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => setShowAssignItemModal(null)}
+                    className="btn-machined p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/[0.05] border border-transparent hover:border-white/[0.08] cursor-pointer"
+                    title="Close"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* 2. Search, Filter Tabs & Bulk Actions Deck */}
+                <div className="space-y-2.5 shrink-0">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+                    {/* Search Bar */}
+                    <div className="relative flex-1">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        placeholder="Search items by code (e.g. CM001), name, or drawing no..."
+                        value={bomSearchTerm}
+                        onChange={(e) => setBomSearchTerm(e.target.value)}
+                        className="w-full pl-8 pr-8 py-1.5 text-xs bg-black/40 text-white rounded-xl border border-white/[0.08] focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400/30 placeholder-slate-500 transition-colors font-mono"
+                      />
+                      {bomSearchTerm && (
+                        <button
+                          onClick={() => setBomSearchTerm('')}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Quick Bulk Qty Setter */}
+                    <div className="flex items-center gap-1.5 bg-black/30 p-1 rounded-xl border border-white/[0.06] shrink-0">
+                      <span className="text-[11px] text-slate-400 pl-1.5 font-medium">Set Checked Qty:</span>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="any"
+                        value={bulkQtyInput}
+                        onChange={(e) => setBulkQtyInput(e.target.value)}
+                        className="w-14 px-2 py-1 bg-black/60 border border-white/[0.1] rounded-lg text-center text-xs font-mono font-bold text-cyan-300 focus:border-cyan-400 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={applyBulkQtyToSelected}
+                        disabled={selectedCount === 0}
+                        className="btn-machined px-2.5 py-1 rounded-lg bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-200 border border-cyan-500/30 text-[11px] font-semibold cursor-pointer disabled:opacity-40"
+                        title="Apply this quantity to all currently checked items"
+                      >
+                        Apply to Selected
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Filter Tabs & Selection Toggle Strip */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-white/[0.05]">
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { id: 'all', label: `All Items (${masterItems.length})` },
+                        { id: 'selected', label: `Selected (${selectedCount})`, highlight: selectedCount > 0 },
+                        { id: 'unassigned', label: `Unassigned (${masterItems.length - Object.keys(existingMap).length})` }
+                      ].map(tab => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setBomFilterTab(tab.id)}
+                          className={`btn-machined px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                            bomFilterTab === tab.id
+                              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                              : 'bg-black/20 text-slate-400 hover:text-white border border-white/[0.05]'
+                          } ${tab.highlight ? 'text-cyan-300' : ''}`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => selectAllFilteredItems(!isAllFilteredSelected, filteredList)}
+                        className="btn-machined text-[11px] text-cyan-400 hover:text-cyan-300 font-semibold cursor-pointer"
+                      >
+                        {isAllFilteredSelected ? 'Deselect Filtered' : 'Select All Filtered'}
+                      </button>
+                      <span className="text-slate-600">•</span>
+                      <button
+                        type="button"
+                        onClick={() => selectAllFilteredItems(false, masterItems)}
+                        className="btn-machined text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Items Selection Table (Scrollable) */}
+                <div className="flex-1 overflow-y-auto border border-white/[0.08] rounded-xl bg-black/40 min-h-[220px] max-h-[380px]">
+                  {filteredList.length === 0 ? (
+                    <div className="py-12 text-center text-slate-500 text-xs space-y-1">
+                      <p>No manufactured items match the search or filter criteria.</p>
+                      <button
+                        onClick={() => { setBomSearchTerm(''); setBomFilterTab('all'); }}
+                        className="text-cyan-400 hover:underline font-semibold text-[11px]"
+                      >
+                        Reset filters
+                      </button>
+                    </div>
+                  ) : (
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead className="sticky top-0 z-10 bg-[#0a0e19] border-b border-white/[0.08] text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider">
+                        <tr>
+                          <th className="py-2.5 px-3 w-10 text-center">
+                            <input
+                              type="checkbox"
+                              checked={isAllFilteredSelected}
+                              onChange={(e) => selectAllFilteredItems(e.target.checked, filteredList)}
+                              className="rounded border-slate-700 bg-black text-cyan-500 focus:ring-0 w-3.5 h-3.5 cursor-pointer"
+                              title="Toggle select all filtered"
+                            />
+                          </th>
+                          <th className="py-2.5 px-3 min-w-[180px]">Component Item Code & Name</th>
+                          <th className="py-2.5 px-3 min-w-[140px] text-center">Consumption Qty *</th>
+                          <th className="py-2.5 px-3 min-w-[70px]">Unit</th>
+                          <th className="py-2.5 px-3 min-w-[140px]">Notes</th>
+                          <th className="py-2.5 px-3 min-w-[100px] text-right">BOM Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/[0.04]">
+                        {filteredList.map((itm) => {
+                          const state = multiBOMSelection[itm.item_code] || {
+                            selected: false,
+                            consumption_qty: 1,
+                            unit: 'pcs',
+                            notes: '',
+                            is_existing: Boolean(existingMap[itm.item_code])
+                          };
+                          const isSelected = Boolean(state.selected);
+                          const isExisting = Boolean(existingMap[itm.item_code]);
+
+                          return (
+                            <tr
+                              key={itm.item_code}
+                              onClick={(e) => {
+                                // Ignore if click originated directly inside input or select
+                                if (['INPUT', 'SELECT'].includes(e.target.tagName)) return;
+                                toggleItemSelection(itm.item_code);
+                              }}
+                              className={`transition-colors cursor-pointer ${
+                                isSelected
+                                  ? 'bg-cyan-500/[0.08] hover:bg-cyan-500/[0.12]'
+                                  : 'hover:bg-white/[0.02]'
+                              }`}
+                            >
+                              {/* Checkbox */}
+                              <td className="py-2.5 px-3 text-center">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => toggleItemSelection(itm.item_code)}
+                                  className="rounded border-slate-700 bg-black text-cyan-500 focus:ring-0 w-3.5 h-3.5 cursor-pointer"
+                                />
+                              </td>
+
+                              {/* Item Code & Details */}
+                              <td className="py-2.5 px-3">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-mono text-xs font-bold text-cyan-300">
+                                    {itm.item_code}
+                                  </span>
+                                  {itm.drawing_no && (
+                                    <span className="text-[10px] text-slate-400 font-mono">
+                                      • Dwg: {itm.drawing_no}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-300 font-medium truncate max-w-[220px]" title={itm.name}>
+                                  {itm.name}
+                                </div>
+                              </td>
+
+                              {/* Consumption Qty */}
+                              <td className="py-2 px-3 text-center">
+                                <div className="inline-flex items-center gap-1">
+                                  <input
+                                    type="number"
+                                    min="0.001"
+                                    step="any"
+                                    value={state.consumption_qty ?? 1}
+                                    onChange={(e) => updateItemQty(itm.item_code, e.target.value)}
+                                    className={`w-20 px-2 py-1 rounded-lg text-center font-mono text-xs font-bold transition-all ${
+                                      isSelected
+                                        ? 'bg-black text-cyan-300 border border-cyan-500/50 ring-1 ring-cyan-500/20'
+                                        : 'bg-black/50 text-slate-400 border border-white/[0.08]'
+                                    } focus:border-cyan-400 focus:outline-none`}
+                                    placeholder="Qty"
+                                  />
+                                </div>
+                              </td>
+
+                              {/* Unit */}
+                              <td className="py-2 px-3">
+                                <span className="text-[11px] font-mono text-slate-400">
+                                  {state.unit || 'pcs'}
+                                </span>
+                              </td>
+
+                              {/* Notes */}
+                              <td className="py-2 px-3">
+                                <input
+                                  type="text"
+                                  placeholder="e.g. Pinion shaft"
+                                  value={state.notes || ''}
+                                  onChange={(e) => updateItemNotes(itm.item_code, e.target.value)}
+                                  className="w-full px-2 py-1 text-[11px] bg-black/40 text-slate-300 rounded-lg border border-white/[0.06] focus:border-cyan-500/40 focus:outline-none placeholder-slate-600"
+                                />
+                              </td>
+
+                              {/* BOM Status Badge */}
+                              <td className="py-2 px-3 text-right">
+                                {isExisting ? (
+                                  <span className="inline-block px-2 py-0.5 rounded-md bg-emerald-950/80 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-semibold">
+                                    In BOM ({existingMap[itm.item_code]?.consumption_qty} {existingMap[itm.item_code]?.unit || 'pcs'})
+                                  </span>
+                                ) : isSelected ? (
+                                  <span className="inline-block px-2 py-0.5 rounded-md bg-cyan-950/80 text-cyan-300 border border-cyan-500/40 text-[10px] font-mono font-bold">
+                                    + Ready to Map
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] text-slate-500 italic">
+                                    Unmapped
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                {/* 4. Footer & Primary Actions */}
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 border-t border-white/[0.08] shrink-0">
+                  <div className="text-xs text-slate-400 flex items-center gap-2">
+                    <span className="font-bold text-white font-mono text-sm bg-cyan-950/60 px-2 py-0.5 rounded-lg border border-cyan-500/30 text-cyan-300">
+                      {selectedCount}
+                    </span>
+                    <span>Component items selected for {showAssignItemModal.assembly_code} BOM</span>
+                  </div>
+
+                  <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setShowAssignItemModal(null)}
+                      className="btn-machined px-4 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 hover:text-white border border-white/[0.08] text-xs font-semibold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleBulkAssignBOM}
+                      disabled={saving || selectedCount === 0}
+                      className="btn-machined px-5 py-2 rounded-xl bg-gradient-to-r from-cyan-500 via-cyan-400 to-teal-400 text-slate-950 text-xs font-extrabold shadow-lg shadow-cyan-500/25 border border-cyan-300/40 cursor-pointer disabled:opacity-40 flex items-center gap-2"
+                    >
+                      {saving ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                          <span>Mapping {selectedCount} Items...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCheck className="w-4 h-4 stroke-[2.5]" />
+                          <span>Assign & Save {selectedCount} Items to BOM</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
               </div>
-              <button
-                onClick={() => setShowAssignItemModal(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
             </div>
-
-            <form onSubmit={handleAssignItem} className="space-y-3.5">
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-300">Select Manufactured Component Item *</label>
-                <select
-                  required
-                  value={assignItemForm.item_code}
-                  onChange={(e) => setAssignItemForm({ ...assignItemForm, item_code: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs font-semibold focus:border-cyan-500 focus:outline-none"
-                >
-                  <option value="">-- Choose Item (e.g. CM001, CM002) --</option>
-                  {masterItems.map((itm) => (
-                    <option key={itm.item_code} value={itm.item_code}>
-                      {itm.item_code} - {itm.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-300">Consumption Qty per Assembly *</label>
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="any"
-                    required
-                    placeholder="e.g. 1 or 2"
-                    value={assignItemForm.consumption_qty}
-                    onChange={(e) => setAssignItemForm({ ...assignItemForm, consumption_qty: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-cyan-500 focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-300">Unit</label>
-                  <input
-                    type="text"
-                    value={assignItemForm.unit}
-                    onChange={(e) => setAssignItemForm({ ...assignItemForm, unit: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs focus:border-cyan-500 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-300">Notes (Optional)</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Main drive shaft pinion or dual flange collar"
-                  value={assignItemForm.notes}
-                  onChange={(e) => setAssignItemForm({ ...assignItemForm, notes: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs focus:border-cyan-500 focus:outline-none"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowAssignItemModal(null)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50"
-                >
-                  {saving ? 'Assigning...' : 'Assign to Assembly'}
-                </button>
-              </div>
-            </form>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
     </div>
   );

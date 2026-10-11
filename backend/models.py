@@ -213,6 +213,9 @@ class AssemblyBOMItemUpdate(BaseModel):
     unit: Optional[str] = "pcs"
     notes: Optional[str] = None
 
+class AssemblyBOMBulkAssign(BaseModel):
+    items: List[AssemblyBOMItemCreate]
+
 class MonthlyTargetItem(BaseModel):
     assembly_id: int
     target_quantity: int

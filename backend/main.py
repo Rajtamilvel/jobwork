@@ -19,7 +19,7 @@ from models import (
     SplitAllocation, BatchSplitAdvance,
     VendorFollowUpCreate, ChallanCreate, ItemWithRouteCreate,
     BulkDispatchToVendor, StageDefinition,
-    AssemblyCreate, AssemblyUpdate, AssemblyBOMItemCreate, AssemblyBOMItemUpdate,
+    AssemblyCreate, AssemblyUpdate, AssemblyBOMItemCreate, AssemblyBOMItemUpdate, AssemblyBOMBulkAssign,
     MonthlyTargetsPayload, DailyScheduleBatchUpdate,
     ItemUpdate, StockAmendmentCreate
 )
@@ -3310,6 +3310,35 @@ def assign_item_to_assembly(assembly_id: int, payload: AssemblyBOMItemCreate):
     conn.commit()
     conn.close()
     return {"message": f"Item {payload.item_code} assigned to assembly with consumption quantity {payload.consumption_qty}"}
+
+@app.post("/api/assemblies/{assembly_id}/bom/bulk")
+def assign_bulk_items_to_assembly(assembly_id: int, payload: AssemblyBOMBulkAssign):
+    if not payload.items:
+        return {"message": "No items provided", "count": 0}
+        
+    conn = get_db()
+    cursor = get_cursor(conn)
+    
+    # Verify assembly exists
+    cursor.execute("SELECT id, assembly_code FROM assemblies WHERE id = %s", (assembly_id,))
+    asm_row = cursor.fetchone()
+    if not asm_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Assembly not found")
+        
+    for item in payload.items:
+        cursor.execute("""
+        INSERT INTO assembly_bom (assembly_id, item_code, consumption_qty, unit, notes)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT(assembly_id, item_code) DO UPDATE SET
+            consumption_qty = excluded.consumption_qty,
+            unit = excluded.unit,
+            notes = excluded.notes
+        """, (assembly_id, item.item_code, float(item.consumption_qty), item.unit or "pcs", item.notes))
+        
+    conn.commit()
+    conn.close()
+    return {"message": f"Successfully assigned {len(payload.items)} items to assembly BOM", "count": len(payload.items)}
 
 @app.delete("/api/assemblies/{assembly_id}/bom/{bom_id}")
 def remove_item_from_assembly(assembly_id: int, bom_id: int):

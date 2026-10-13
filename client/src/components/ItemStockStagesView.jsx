@@ -99,15 +99,18 @@ export default function ItemStockStagesView({
     // Parse stages pipeline
     (item.stages_pipeline || []).forEach(stage => {
       (stage.batches || []).forEach(b => {
+        const qty = Number(b.quantity_accepted) || 0;
+        if (qty <= 0) return; // Ignore any batch with 0 holding quantity
+
         if (!b.is_inhouse && (b.current_vendor_id || b.vendor_name)) {
-          vendorHoldings.append ? null : vendorHoldings.push({
+          vendorHoldings.push({
             vendor_id: b.current_vendor_id,
             vendor_name: b.vendor_name || stage.default_vendor_name || 'Subcontractor',
             vendor_contact: b.vendor_contact,
             vendor_phone: b.vendor_phone,
             stage_seq: b.current_stage_sequence || stage.sequence_no,
             process_name: b.current_process || stage.process_name,
-            quantity: b.quantity_accepted || 0,
+            quantity: qty,
             batch_no: b.batch_no,
             batch_id: b.id,
             challan_no: b.challan_no,
@@ -121,7 +124,7 @@ export default function ItemStockStagesView({
           inhouseWip.push({
             stage_seq: b.current_stage_sequence || stage.sequence_no,
             process_name: b.current_process || stage.process_name,
-            quantity: b.quantity_accepted || 0,
+            quantity: qty,
             batch_no: b.batch_no,
             batch_id: b.id,
             date_started: b.date_started,
@@ -769,9 +772,9 @@ export default function ItemStockStagesView({
                             {totalFinished} pcs
                           </span>
                         </div>
-                        {item.finished_batches && item.finished_batches.length > 0 ? (
+                        {item.finished_batches && item.finished_batches.filter(fb => (Number(fb.quantity_accepted) || 0) > 0).length > 0 ? (
                           <div className="space-y-1 max-h-24 overflow-y-auto pr-1">
-                            {item.finished_batches.map(fb => (
+                            {item.finished_batches.filter(fb => (Number(fb.quantity_accepted) || 0) > 0).map(fb => (
                               <div key={fb.id} className="text-[11px] flex items-center justify-between text-slate-400 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800/80">
                                 <span className="font-mono text-slate-300 font-medium">{fb.batch_no}</span>
                                 <span className="text-emerald-300 font-mono font-bold">{fb.quantity_accepted} pcs completed</span>

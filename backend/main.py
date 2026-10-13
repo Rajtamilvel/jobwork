@@ -2383,6 +2383,7 @@ def get_items_stock_by_stage():
         b.expected_delivery_date, b.challan_no, b.notes
     FROM batches b
     LEFT JOIN vendors v ON b.current_vendor_id = v.id
+    WHERE b.quantity_accepted > 0
     ORDER BY b.is_critical DESC, b.current_stage_sequence ASC, b.id ASC
     """)
     batches_by_item = {}

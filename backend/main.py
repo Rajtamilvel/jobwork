@@ -2607,15 +2607,6 @@ def create_stock_amendment(payload: StockAmendmentCreate):
             raise HTTPException(status_code=400, detail="Stage sequence is required for Stage WIP amendment")
 
         cursor.execute("""
-        SELECT id, batch_no, quantity_accepted, quantity_total, current_process 
-        FROM batches 
-        WHERE item_code = %s AND current_stage_sequence = %s AND status != 'Completed' AND current_process != 'Finished Product'
-        ORDER BY id DESC
-        """, (payload.item_code, payload.stage_sequence))
-        wip_batches = cursor.fetchall()
-        previous_stock = float(sum(b["quantity_accepted"] for b in wip_batches))
-
-        cursor.execute("""
         SELECT rs.route_id, rs.sequence_no, rs.process_name, rs.vendor_id, rs.is_inhouse, rs.lead_time_days
         FROM route_stages rs
         JOIN process_routes pr ON rs.route_id = pr.id
@@ -2625,63 +2616,94 @@ def create_stock_amendment(payload: StockAmendmentCreate):
         """, (payload.item_code, payload.stage_sequence))
         stage_info = cursor.fetchone()
 
-        target_vendor_id = payload.vendor_id if payload.vendor_id is not None else (stage_info["vendor_id"] if stage_info else None)
-        if target_vendor_id:
-            is_inhouse = 0
-        else:
-            is_inhouse = stage_info["is_inhouse"] if stage_info else 1
-
         route_id = stage_info["route_id"] if stage_info else 1
         proc_name = stage_info["process_name"] if stage_info else (payload.stage_name or f"Stage {payload.stage_sequence}")
         lead_time = (stage_info["lead_time_days"] if stage_info else 3) or 3
+
+        # Resolve vendor vs in-house
+        if payload.is_inhouse is True:
+            target_vendor_id = None
+            is_inhouse = 1
+        elif payload.vendor_id is not None and payload.vendor_id > 0:
+            target_vendor_id = payload.vendor_id
+            is_inhouse = 0
+        else:
+            if stage_info:
+                if stage_info["is_inhouse"] or not stage_info["vendor_id"]:
+                    target_vendor_id = None
+                    is_inhouse = 1
+                else:
+                    target_vendor_id = stage_info["vendor_id"]
+                    is_inhouse = 0
+            else:
+                target_vendor_id = None
+                is_inhouse = 1
+
+        vendor_name = None
+        if target_vendor_id:
+            cursor.execute("SELECT name FROM vendors WHERE id = %s", (target_vendor_id,))
+            v_row = cursor.fetchone()
+            vendor_name = v_row["name"] if v_row else f"Vendor #{target_vendor_id}"
+
         status_str = "In Process" if is_inhouse else "With Vendor"
+
+        # Fetch active WIP batches SPECIFIC to this vendor / in-house location at this stage
+        if target_vendor_id:
+            cursor.execute("""
+            SELECT id, batch_no, quantity_accepted, quantity_total, current_process 
+            FROM batches 
+            WHERE item_code = %s AND current_stage_sequence = %s 
+              AND current_vendor_id = %s
+              AND status != 'Completed' AND current_process != 'Finished Product'
+            ORDER BY id DESC
+            """, (payload.item_code, payload.stage_sequence, target_vendor_id))
+        else:
+            cursor.execute("""
+            SELECT id, batch_no, quantity_accepted, quantity_total, current_process 
+            FROM batches 
+            WHERE item_code = %s AND current_stage_sequence = %s 
+              AND (is_inhouse = 1 OR current_vendor_id IS NULL)
+              AND status != 'Completed' AND current_process != 'Finished Product'
+            ORDER BY id DESC
+            """, (payload.item_code, payload.stage_sequence))
+        vendor_wip_batches = cursor.fetchall()
+        previous_stock = float(sum(b["quantity_accepted"] for b in vendor_wip_batches))
 
         if payload.adjustment_type == "add":
             new_stock = previous_stock + payload.quantity
-            if wip_batches:
-                # Add to newest active batch at this stage
-                latest_id = wip_batches[0]["id"]
-                cursor.execute("""
-                UPDATE batches 
-                SET quantity_accepted = quantity_accepted + %s,
-                    quantity_total = quantity_total + %s,
-                    current_vendor_id = COALESCE(%s, current_vendor_id),
-                    is_inhouse = CASE WHEN %s IS NOT NULL THEN 0 ELSE is_inhouse END,
-                    status = CASE WHEN %s IS NOT NULL THEN 'With Vendor' ELSE status END
-                WHERE id = %s
-                """, (int(payload.quantity), int(payload.quantity), target_vendor_id, target_vendor_id, target_vendor_id, latest_id))
-            else:
-                # Create a new WIP batch for this stage
-                batch_no = f"ADJ-WIP-{datetime.now().strftime('%y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
-                today = datetime.now()
-                today_str = today.strftime("%Y-%m-%d")
-                exp_date = (today + timedelta(days=lead_time)).strftime("%Y-%m-%d")
+            # Always create a new, distinct batch for this vendor/location.
+            # Never overwrite or merge with batches of different vendors.
+            batch_no = f"ADJ-WIP-{datetime.now().strftime('%y%m%d%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
+            today = datetime.now()
+            today_str = today.strftime("%Y-%m-%d")
+            exp_date = (today + timedelta(days=lead_time)).strftime("%Y-%m-%d")
 
-                cursor.execute("""
-                INSERT INTO batches (
-                    batch_no, item_code, route_id, current_stage_sequence, current_process,
-                    current_vendor_id, is_inhouse, quantity_total, quantity_accepted, quantity_rejected,
-                    status, is_critical, date_started, date_sent_to_vendor, expected_delivery_date, notes
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, 0, %s, %s, %s, %s)
-                """, (
-                    batch_no, payload.item_code, route_id, payload.stage_sequence, proc_name,
-                    target_vendor_id, 1 if is_inhouse else 0, int(payload.quantity), int(payload.quantity),
-                    status_str, today_str,
-                    today_str if not is_inhouse else None,
-                    exp_date if not is_inhouse else None,
-                    f"Stock Amendment (+): {payload.reason}. Remarks: {payload.remarks or ''}"
-                ))
+            cursor.execute("""
+            INSERT INTO batches (
+                batch_no, item_code, route_id, current_stage_sequence, current_process,
+                current_vendor_id, is_inhouse, quantity_total, quantity_accepted, quantity_rejected,
+                status, is_critical, date_started, date_sent_to_vendor, expected_delivery_date, notes
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, 0, %s, %s, %s, %s)
+            """, (
+                batch_no, payload.item_code, route_id, payload.stage_sequence, proc_name,
+                target_vendor_id, 1 if is_inhouse else 0, int(payload.quantity), int(payload.quantity),
+                status_str, today_str,
+                today_str if not is_inhouse else None,
+                exp_date if not is_inhouse else None,
+                f"Stock Amendment (+): {payload.reason}. Location: {vendor_name or 'In-House'}. Remarks: {payload.remarks or ''}"
+            ))
 
         else:  # deduct
+            vendor_label = vendor_name if vendor_name else "In-House Shop Floor"
             if payload.quantity > previous_stock:
                 conn.close()
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot deduct {int(payload.quantity)} pcs: current WIP stock at stage {payload.stage_name or payload.stage_sequence} is only {int(previous_stock)} pcs."
+                    detail=f"Cannot deduct {int(payload.quantity)} pcs: current WIP stock with {vendor_label} at {proc_name} (Stage {payload.stage_sequence}) is only {int(previous_stock)} pcs."
                 )
             new_stock = previous_stock - payload.quantity
             remaining = int(payload.quantity)
-            for b in wip_batches:
+            for b in vendor_wip_batches:
                 b_id = b["id"]
                 b_qty = b["quantity_accepted"]
                 if b_qty <= remaining:
@@ -2726,6 +2748,12 @@ def create_stock_amendment(payload: StockAmendmentCreate):
         raise HTTPException(status_code=400, detail=f"Invalid target_type '{payload.target_type}'. Must be 'finished_goods', 'stage_wip', or 'raw_material'")
 
     # Record full audit trail in stock_amendments table
+    stage_audit_name = payload.stage_name
+    if payload.target_type == "stage_wip":
+        stage_audit_name = proc_name
+        loc_tag = f"[{vendor_name}]" if vendor_name else "[In-House]"
+        stage_audit_name = f"{proc_name} {loc_tag}"
+
     amd_no = f"AMD-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
     cursor.execute("""
     INSERT INTO stock_amendments (
@@ -2735,7 +2763,7 @@ def create_stock_amendment(payload: StockAmendmentCreate):
     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         amd_no, payload.target_type, payload.item_code, payload.stage_sequence,
-        payload.stage_name, payload.raw_material_code, payload.adjustment_type,
+        stage_audit_name, payload.raw_material_code, payload.adjustment_type,
         payload.quantity, previous_stock, new_stock, payload.reason, payload.remarks
     ))
 

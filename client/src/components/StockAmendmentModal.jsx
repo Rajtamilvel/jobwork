@@ -21,14 +21,18 @@ const REASON_OPTIONS = [
 
 export default function StockAmendmentModal({ 
   initialItem = null,
-  initialTargetType = 'finished_goods',
+  item = null,
+  initialTargetType = null,
   initialStageSeq = null,
   initialRawMaterialCode = null,
   onClose, 
   onSuccess 
 }) {
+  const effectiveInitialItem = initialItem || item;
+  const defaultTargetType = initialTargetType || (effectiveInitialItem ? 'stage_wip' : 'finished_goods');
+
   const [activeTab, setActiveTab] = useState('amend'); // 'amend' | 'history'
-  const [targetType, setTargetType] = useState(initialTargetType); // 'finished_goods', 'stage_wip', 'raw_material'
+  const [targetType, setTargetType] = useState(defaultTargetType); // 'finished_goods', 'stage_wip', 'raw_material'
   const [adjustmentType, setAdjustmentType] = useState('add'); // 'add' (+) | 'deduct' (-)
   const [quantity, setQuantity] = useState('');
   const [reason, setReason] = useState('Physical Stock Count Variance');
@@ -44,7 +48,7 @@ export default function StockAmendmentModal({
   
   // Selected targets
   const [selectedItemCode, setSelectedItemCode] = useState(
-    typeof initialItem === 'string' ? initialItem : (initialItem?.item_code || '')
+    typeof effectiveInitialItem === 'string' ? effectiveInitialItem : (effectiveInitialItem?.item_code || '')
   );
   const [selectedStageSeq, setSelectedStageSeq] = useState(initialStageSeq || null);
   const [selectedVendorId, setSelectedVendorId] = useState('');
@@ -151,30 +155,55 @@ export default function StockAmendmentModal({
     if (selectedStageObj) {
       if (!selectedStageObj.is_inhouse && selectedStageObj.vendor_id) {
         setSelectedVendorId(String(selectedStageObj.vendor_id));
-      } else if (selectedStageObj.is_inhouse) {
-        setSelectedVendorId('');
+      } else {
+        setSelectedVendorId('inhouse');
       }
     }
   }, [selectedStageSeq, selectedStageObj]);
 
+  const stg = currentItemStockInfo?.stages_pipeline?.find(s => s.sequence_no === Number(selectedStageSeq));
+  const stageBatches = stg?.batches || [];
+
+  // Helper for holdings per vendor / in-house at this stage
+  const inhouseStockAtStage = stageBatches
+    .filter(b => b.is_inhouse || !b.current_vendor_id)
+    .reduce((sum, b) => sum + (Number(b.quantity_accepted) || 0), 0);
+
+  const getVendorStockAtStage = (vId) => {
+    return stageBatches
+      .filter(b => String(b.current_vendor_id) === String(vId))
+      .reduce((sum, b) => sum + (Number(b.quantity_accepted) || 0), 0);
+  };
+
   let currentStock = 0;
   let unitLabel = 'pcs';
   let stageName = '';
+  let stageTotalStock = 0;
+  let selectedLocationLabel = '';
 
   if (targetType === 'finished_goods') {
     currentStock = currentItemStockInfo?.total_finished_quantity || 0;
     unitLabel = 'pcs';
+    selectedLocationLabel = 'Finished Goods Store';
   } else if (targetType === 'stage_wip') {
     unitLabel = 'pcs';
     if (selectedStageSeq !== null) {
-      const stg = currentItemStockInfo?.stages_pipeline?.find(s => s.sequence_no === Number(selectedStageSeq));
-      currentStock = stg?.current_quantity || 0;
       stageName = stg?.process_name || `Stage #${selectedStageSeq}`;
+      stageTotalStock = stg?.current_quantity || 0;
+      if (selectedVendorId && selectedVendorId !== 'inhouse') {
+        currentStock = getVendorStockAtStage(selectedVendorId);
+        const v = vendors.find(vend => String(vend.id) === String(selectedVendorId));
+        selectedLocationLabel = v ? `${v.name} (${v.code})` : `Vendor #${selectedVendorId}`;
+      } else {
+        currentStock = inhouseStockAtStage;
+        selectedLocationLabel = 'In-House Shop Floor';
+      }
     }
   } else if (targetType === 'raw_material') {
     const rm = rawMaterials.find(r => r.code === selectedRawMaterialCode);
     currentStock = rm?.stock_quantity || 0;
     unitLabel = rm?.unit || 'kg';
+    selectedLocationLabel = rm?.name || 'Raw Material Store';
   }
 
   const numQty = parseFloat(quantity) || 0;
@@ -195,7 +224,7 @@ export default function StockAmendmentModal({
     }
 
     if (isDeductTooMuch) {
-      setError(`Cannot deduct ${numQty} ${unitLabel}: current stock is only ${currentStock} ${unitLabel}.`);
+      setError(`Cannot deduct ${numQty} ${unitLabel}: current stock held by ${selectedLocationLabel} is only ${currentStock} ${unitLabel}.`);
       return;
     }
 
@@ -220,8 +249,12 @@ export default function StockAmendmentModal({
         payload.item_code = selectedItemCode;
         payload.stage_sequence = Number(selectedStageSeq);
         payload.stage_name = stageName;
-        if (selectedVendorId) {
+        if (selectedVendorId && selectedVendorId !== 'inhouse') {
           payload.vendor_id = Number(selectedVendorId);
+          payload.is_inhouse = false;
+        } else {
+          payload.vendor_id = null;
+          payload.is_inhouse = true;
         }
       } else if (targetType === 'raw_material') {
         payload.raw_material_code = selectedRawMaterialCode;
@@ -439,28 +472,33 @@ export default function StockAmendmentModal({
                       </div>
                     )}
 
-                    {targetType === 'stage_wip' && selectedStageObj && !selectedStageObj.is_inhouse && (
+                    {targetType === 'stage_wip' && selectedStageSeq !== null && (
                       <div className="sm:col-span-2 p-3 bg-slate-900/90 rounded-xl border border-indigo-900/60 flex flex-col gap-1.5">
                         <div className="flex items-center justify-between">
                           <label className="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
                             <Truck className="w-3.5 h-3.5 text-indigo-400" />
-                            <span>Assigned Subcontract Vendor</span>
+                            <span>Holding Subcontract Vendor / In-House Floor</span>
                           </label>
                           <span className="text-[10px] text-slate-400 font-mono">
-                            Stock will reflect in Vendor Stocks page
+                            Stage Total WIP: <span className="text-cyan-300 font-bold">{stageTotalStock} pcs</span>
                           </span>
                         </div>
                         <select
-                          value={selectedVendorId || ''}
+                          value={selectedVendorId || 'inhouse'}
                           onChange={(e) => setSelectedVendorId(e.target.value)}
                           className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none font-medium"
                         >
-                          <option value="">-- Choose Subcontract Vendor --</option>
-                          {vendors.map(v => (
-                            <option key={v.id} value={v.id}>
-                              {v.code} - {v.name} ({v.processes_offered || 'Vendor'})
-                            </option>
-                          ))}
+                          <option value="inhouse">
+                            🏢 In-House Shop Floor (Current holding: {inhouseStockAtStage} pcs)
+                          </option>
+                          {vendors.map(v => {
+                            const vHolding = getVendorStockAtStage(v.id);
+                            return (
+                              <option key={v.id} value={String(v.id)}>
+                                🏭 {v.name} ({v.code}) — Holding: {vHolding} pcs
+                              </option>
+                            );
+                          })}
                         </select>
                       </div>
                     )}
@@ -550,8 +588,8 @@ export default function StockAmendmentModal({
               <div className="p-4 rounded-xl bg-gradient-to-r from-slate-950 to-slate-900 border border-slate-800 space-y-2">
                 <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
                   <span>Stock Impact Calculation</span>
-                  <span className="font-mono text-cyan-400">
-                    {targetType === 'finished_goods' ? 'Finished Stock' : (targetType === 'stage_wip' ? `${stageName || 'Stage'} WIP` : 'Raw Material')}
+                  <span className="font-mono text-cyan-400 truncate max-w-[240px]" title={selectedLocationLabel}>
+                    {targetType === 'finished_goods' ? 'Finished Goods Store' : (targetType === 'stage_wip' ? `${stageName} • ${selectedLocationLabel}` : selectedLocationLabel)}
                   </span>
                 </div>
 
@@ -561,6 +599,11 @@ export default function StockAmendmentModal({
                     <div className="text-base font-black font-mono text-white">
                       {currentStock} <span className="text-xs font-normal text-slate-400">{unitLabel}</span>
                     </div>
+                    {targetType === 'stage_wip' && (
+                      <div className="text-[9px] text-slate-400 mt-0.5 truncate" title={`Stage Total: ${stageTotalStock} ${unitLabel}`}>
+                        Total WIP: {stageTotalStock} {unitLabel}
+                      </div>
+                    )}
                   </div>
 
                   <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-800">
@@ -569,6 +612,11 @@ export default function StockAmendmentModal({
                       {numQty > 0 ? (adjustmentType === 'add' ? `+${numQty}` : `-${numQty}`) : '0'} 
                       <span className="text-xs font-normal text-slate-400"> {unitLabel}</span>
                     </div>
+                    {targetType === 'stage_wip' && (
+                      <div className="text-[9px] text-indigo-400 mt-0.5 truncate" title={selectedLocationLabel}>
+                        {selectedLocationLabel}
+                      </div>
+                    )}
                   </div>
 
                   <div className={`p-2 rounded-lg border ${
@@ -581,13 +629,18 @@ export default function StockAmendmentModal({
                       {numQty > 0 ? projectedStock : currentStock} 
                       <span className="text-xs font-normal opacity-80"> {unitLabel}</span>
                     </div>
+                    {targetType === 'stage_wip' && (
+                      <div className="text-[9px] text-cyan-400/90 mt-0.5 truncate font-medium">
+                        New Stage Total: {numQty > 0 ? (adjustmentType === 'add' ? stageTotalStock + numQty : stageTotalStock - numQty) : stageTotalStock} {unitLabel}
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {isDeductTooMuch && (
                   <div className="text-[11px] text-rose-400 flex items-center gap-1.5 pt-1 font-medium">
                     <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                    <span>Insufficient inventory! You cannot deduct more than current stock ({currentStock} {unitLabel}).</span>
+                    <span>Insufficient inventory! You cannot deduct more than current stock held by {selectedLocationLabel} ({currentStock} {unitLabel}).</span>
                   </div>
                 )}
               </div>

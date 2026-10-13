@@ -261,6 +261,7 @@ class StockAmendmentCreate(BaseModel):
     stage_sequence: Optional[int] = None
     stage_name: Optional[str] = None
     vendor_id: Optional[int] = None
+    is_inhouse: Optional[bool] = None
     raw_material_code: Optional[str] = None
     reason: str
     remarks: Optional[str] = None

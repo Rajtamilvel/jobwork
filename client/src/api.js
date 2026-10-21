@@ -174,6 +174,12 @@ export async function fetchItemRoutes(itemCode) {
   return res.json();
 }
 
+export async function fetchAllItemRoutes() {
+  const res = await fetch(`${API_BASE}/items/routes/all`);
+  if (!res.ok) throw new Error('Failed to fetch all item routes');
+  return res.json();
+}
+
 export async function createItemRoute(itemCode, data) {
   const res = await fetch(`${API_BASE}/items/${encodeURIComponent(itemCode)}/routes`, {
     method: 'POST',

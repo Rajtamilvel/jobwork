@@ -4,7 +4,7 @@ import {
   Flame, CheckCircle2, ArrowRight, RefreshCw, Box, Boxes, Trash2, AlertTriangle,
   ArrowUpDown, Edit3, List, LayoutGrid, Lock, PackageCheck, Sparkles, Filter
 } from 'lucide-react';
-import { fetchItems, fetchItemRoutes, deleteItem } from '../api';
+import { fetchItems, fetchItemRoutes, fetchAllItemRoutes, deleteItem } from '../api';
 import EditItemModal from './EditItemModal';
 import StockAmendmentModal from './StockAmendmentModal';
 
@@ -29,19 +29,11 @@ export default function ItemsRouteView({ onOpenAddModal, onLaunchBatch, onViewIt
   async function loadItems() {
     try {
       setLoading(true);
-      const data = await fetchItems();
-      setItems(data);
-
-      // Fetch routes for each item
-      const routesMap = {};
-      for (const itm of data) {
-        try {
-          const r = await fetchItemRoutes(itm.item_code);
-          routesMap[itm.item_code] = r;
-        } catch (e) {
-          console.error(e);
-        }
-      }
+      const [itemsData, routesMap] = await Promise.all([
+        fetchItems(),
+        fetchAllItemRoutes().catch(() => ({}))
+      ]);
+      setItems(itemsData);
       setItemRoutes(routesMap);
     } catch (err) {
       console.error(err);

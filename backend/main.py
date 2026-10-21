@@ -1584,6 +1584,48 @@ def create_item(payload: ItemCreate):
     conn.close()
     return {"message": "Item registered successfully", "item_code": payload.item_code}
 
+@app.get("/api/items/routes/all")
+def get_all_items_routes():
+    """
+    High-performance bulk endpoint: Returns all process routes and stages
+    for all items grouped by item_code in just 2 optimized SQL queries.
+    Prevents N+1 HTTP calls on Items & Process Routes page.
+    """
+    conn = get_db()
+    cursor = get_cursor(conn)
+
+    # 1. Fetch all routes
+    cursor.execute("""
+    SELECT id, item_code, route_name, is_default, description, created_at
+    FROM process_routes
+    ORDER BY item_code ASC, is_default DESC, id ASC
+    """)
+    all_routes = [dict(r) for r in cursor.fetchall()]
+
+    # 2. Fetch all stages with vendor names
+    cursor.execute("""
+    SELECT 
+        rs.id, rs.route_id, rs.sequence_no, rs.process_name, rs.vendor_id, v.name as vendor_name,
+        rs.is_inhouse, rs.lead_time_days, rs.is_welding_stage, rs.notes
+    FROM route_stages rs
+    LEFT JOIN vendors v ON rs.vendor_id = v.id
+    ORDER BY rs.route_id ASC, rs.sequence_no ASC
+    """)
+    stages_by_route = {}
+    for s in cursor.fetchall():
+        sdict = dict(s)
+        stages_by_route.setdefault(sdict["route_id"], []).append(sdict)
+
+    conn.close()
+
+    # Map stages to routes, and group routes by item_code
+    routes_by_item = {}
+    for r in all_routes:
+        r["stages"] = stages_by_route.get(r["id"], [])
+        routes_by_item.setdefault(r["item_code"], []).append(r)
+
+    return routes_by_item
+
 @app.get("/api/items/{item_code}/routes")
 def get_item_routes(item_code: str):
     """
@@ -3219,10 +3261,12 @@ def get_assemblies():
     """
     Get all top-level assemblies with their assigned BOM items (consumption mapping),
     including current finished and WIP stock of each component item.
+    Optimized: Replaces hundreds of nested SQL queries with 3 set-based bulk queries.
     """
     conn = get_db()
     cursor = get_cursor(conn)
     
+    # 1. Fetch all assemblies
     cursor.execute("""
     SELECT id, assembly_code, name, description, customer, drawing_no, created_at
     FROM assemblies
@@ -3230,38 +3274,50 @@ def get_assemblies():
     """)
     assemblies = [dict(r) for r in cursor.fetchall()]
     
+    # 2. Fetch all BOM items across all assemblies in ONE query
+    cursor.execute("""
+    SELECT 
+        b.id as bom_id, b.assembly_id, b.item_code, i.name as item_name, i.drawing_no,
+        b.consumption_qty, b.unit, b.notes
+    FROM assembly_bom b
+    JOIN items i ON b.item_code = i.item_code
+    ORDER BY b.assembly_id ASC, b.item_code ASC
+    """)
+    all_boms = [dict(r) for r in cursor.fetchall()]
+
+    # 3. Bulk calculate finished and WIP stock for all items in ONE query
+    cursor.execute("""
+    SELECT 
+        item_code,
+        COALESCE(SUM(CASE WHEN status = 'Completed' OR current_process = 'Finished Product' THEN quantity_accepted ELSE 0 END), 0) as finished_stock,
+        COALESCE(SUM(CASE WHEN status != 'Completed' AND current_process != 'Finished Product' THEN quantity_accepted ELSE 0 END), 0) as wip_stock
+    FROM batches
+    WHERE quantity_accepted > 0
+    GROUP BY item_code
+    """)
+    stock_map = {}
+    for row in cursor.fetchall():
+        stock_map[row["item_code"]] = {
+            "finished_stock": float(row["finished_stock"] or 0),
+            "wip_stock": float(row["wip_stock"] or 0)
+        }
+    
+    conn.close()
+
+    # Group BOM items by assembly_id and attach stock
+    boms_by_assembly = {}
+    for itm in all_boms:
+        icode = itm["item_code"]
+        stk = stock_map.get(icode, {"finished_stock": 0.0, "wip_stock": 0.0})
+        itm["finished_stock"] = stk["finished_stock"]
+        itm["wip_stock"] = stk["wip_stock"]
+        boms_by_assembly.setdefault(itm["assembly_id"], []).append(itm)
+
     for asm in assemblies:
-        cursor.execute("""
-        SELECT 
-            b.id as bom_id, b.item_code, i.name as item_name, i.drawing_no,
-            b.consumption_qty, b.unit, b.notes
-        FROM assembly_bom b
-        JOIN items i ON b.item_code = i.item_code
-        WHERE b.assembly_id = %s
-        ORDER BY b.item_code ASC
-        """, (asm["id"],))
-        bom_items = [dict(r) for r in cursor.fetchall()]
-        
-        # Enrich with current stock numbers for each component
-        for itm in bom_items:
-            # Finished stock: Completed status or current_process = 'Finished Product'
-            cursor.execute("""
-            SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-            WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
-            """, (itm["item_code"],))
-            itm["finished_stock"] = get_scalar(cursor, 0)
-            
-            # In-process WIP stock
-            cursor.execute("""
-            SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-            WHERE item_code = %s AND status != 'Completed' AND current_process != 'Finished Product'
-            """, (itm["item_code"],))
-            itm["wip_stock"] = get_scalar(cursor, 0)
-            
+        bom_items = boms_by_assembly.get(asm["id"], [])
         asm["bom_items"] = bom_items
         asm["total_components_count"] = len(bom_items)
-        
-    conn.close()
+
     return assemblies
 
 @app.post("/api/assemblies")
@@ -3382,6 +3438,7 @@ def remove_item_from_assembly(assembly_id: int, bom_id: int):
 def get_production_plans(month: Optional[str] = None):
     """
     Get Monthly targets and Daywise plan schedule for all assemblies in a given month (YYYY-MM).
+    Optimized: Bulk fetches monthly targets and daily plans in 3 total queries instead of 2*N queries.
     """
     if not month:
         month = datetime.now().strftime("%Y-%m")
@@ -3412,43 +3469,54 @@ def get_production_plans(month: Optional[str] = None):
             "is_working_day": d_date.weekday() < 6
         })
         
-    # For each assembly, load monthly plan and daywise schedule
+    # 2. Bulk fetch monthly plans for all assemblies in ONE query
+    cursor.execute("""
+    SELECT assembly_id, target_quantity, working_days, notes
+    FROM assembly_monthly_plans
+    WHERE year_month = %s
+    """, (month,))
+    monthly_plans_map = {row["assembly_id"]: row for row in cursor.fetchall()}
+
+    # 3. Bulk fetch daily plans for all assemblies in ONE query
+    cursor.execute("""
+    SELECT assembly_id, plan_date, planned_quantity, actual_quantity, notes
+    FROM assembly_daily_plans
+    WHERE plan_date LIKE %s
+    """, (f"{month}-%",))
+    daily_plans_map = {} # (assembly_id, plan_date) -> row
+    for row in cursor.fetchall():
+        daily_plans_map[(row["assembly_id"], row["plan_date"])] = row
+
+    conn.close()
+
     for asm in assemblies:
-        # Monthly plan
-        cursor.execute("""
-        SELECT target_quantity, working_days, notes
-        FROM assembly_monthly_plans
-        WHERE year_month = %s AND assembly_id = %s
-        """, (month, asm["id"]))
-        m_row = cursor.fetchone()
+        aid = asm["id"]
+        m_row = monthly_plans_map.get(aid)
         asm["target_quantity"] = m_row["target_quantity"] if m_row else 0
         asm["working_days"] = m_row["working_days"] if m_row else 25
         asm["monthly_notes"] = m_row["notes"] if m_row else ""
-        
-        # Daywise schedule
-        cursor.execute("""
-        SELECT plan_date, planned_quantity, actual_quantity, notes
-        FROM assembly_daily_plans
-        WHERE plan_date LIKE %s AND assembly_id = %s
-        """, (f"{month}-%", asm["id"]))
-        rows = cursor.fetchall()
-        day_map = {row["plan_date"]: row["planned_quantity"] for row in rows}
-        actual_map = {row["plan_date"]: row["actual_quantity"] for row in rows}
-        
-        # Build full schedule for every day in month
-        asm["daywise_schedule"] = [
-            {
-                "date": d["date"],
+
+        asm["daywise_schedule"] = []
+        tot_sched = 0
+        tot_act = 0
+        for d in days_info:
+            d_date = d["date"]
+            d_plan = daily_plans_map.get((aid, d_date))
+            planned_qty = d_plan["planned_quantity"] if d_plan else 0
+            actual_qty = d_plan["actual_quantity"] if d_plan else None
+            tot_sched += (planned_qty or 0)
+            if actual_qty is not None:
+                tot_act += actual_qty
+
+            asm["daywise_schedule"].append({
+                "date": d_date,
                 "day": d["day"],
-                "planned_quantity": day_map.get(d["date"], 0),
-                "actual_quantity": actual_map.get(d["date"], None)
-            }
-            for d in days_info
-        ]
-        asm["total_scheduled_quantity"] = sum(asm["daywise_schedule"][i]["planned_quantity"] for i in range(len(days_info)))
-        asm["total_actual_quantity"] = sum(asm["daywise_schedule"][i]["actual_quantity"] or 0 for i in range(len(days_info)))
+                "planned_quantity": planned_qty or 0,
+                "actual_quantity": actual_qty
+            })
+        asm["total_scheduled_quantity"] = tot_sched
+        asm["total_actual_quantity"] = tot_act
         
-    conn.close()
     return {
         "year_month": month,
         "num_days": num_days,
@@ -3617,7 +3685,25 @@ def calculate_daily_consumption(month: Optional[str] = None):
             "consumption_qty": r["consumption_qty"]
         })
         
-    # 4. Fetch inventory (Finished Stock & WIP) for each mapped item
+    # 4. Fetch inventory (Finished Stock & WIP) for each mapped item in ONE bulk query
+    cursor.execute("""
+    SELECT 
+        item_code,
+        COALESCE(SUM(CASE WHEN status = 'Completed' OR current_process = 'Finished Product' THEN quantity_accepted ELSE 0 END), 0) as finished_stock,
+        COALESCE(SUM(CASE WHEN status != 'Completed' AND current_process != 'Finished Product' THEN quantity_accepted ELSE 0 END), 0) as wip_stock
+    FROM batches
+    WHERE quantity_accepted > 0
+    GROUP BY item_code
+    """)
+    stock_map = {}
+    for row in cursor.fetchall():
+        stock_map[row["item_code"]] = {
+            "finished_stock": float(row["finished_stock"] or 0),
+            "wip_stock": float(row["wip_stock"] or 0)
+        }
+
+    conn.close()
+
     items_consumption_list = []
     total_components_month_demand = 0
     total_assemblies_month_planned = 0
@@ -3634,19 +3720,9 @@ def calculate_daily_consumption(month: Optional[str] = None):
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     for icode, boms in item_boms.items():
-        # Current completed finished stock
-        cursor.execute("""
-        SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-        WHERE item_code = %s AND (status = 'Completed' OR current_process = 'Finished Product')
-        """, (icode,))
-        current_finished = get_scalar(cursor, 0)
-        
-        # Current in-progress WIP across vendors
-        cursor.execute("""
-        SELECT COALESCE(SUM(quantity_accepted), 0) FROM batches 
-        WHERE item_code = %s AND status != 'Completed' AND current_process != 'Finished Product'
-        """, (icode,))
-        current_wip = get_scalar(cursor, 0)
+        stk = stock_map.get(icode, {"finished_stock": 0.0, "wip_stock": 0.0})
+        current_finished = stk["finished_stock"]
+        current_wip = stk["wip_stock"]
         
         # Calculate daily consumption for this item
         daily_quantities = {}
@@ -3749,8 +3825,6 @@ def calculate_daily_consumption(month: Optional[str] = None):
             "daily_breakdowns": daily_breakdowns
         })
         
-    conn.close()
-    
     # Calculate daily totals across all items
     daily_totals_all_items = {}
     for d in days_info:

@@ -101,30 +101,40 @@ export default function AssemblyPlanningView() {
     loadAllData();
   }, [selectedMonth]);
 
-  async function loadAllData() {
+  async function loadAllData(forceReloadMeta = false) {
     try {
       setLoading(true);
-      const [consRes, plansRes, asmsRes, itemsRes] = await Promise.all([
+      const shouldFetchMeta = forceReloadMeta || assemblies.length === 0 || masterItems.length === 0;
+      const promises = [
         fetchDailyConsumption(selectedMonth),
-        fetchProductionPlans(selectedMonth),
-        fetchAssemblies(),
-        fetchItems()
-      ]);
+        fetchProductionPlans(selectedMonth)
+      ];
+      if (shouldFetchMeta) {
+        promises.push(fetchAssemblies());
+        promises.push(fetchItems());
+      }
+
+      const results = await Promise.all(promises);
+      const consRes = results[0];
+      const plansRes = results[1];
 
       setConsumptionData(consRes);
       setPlansData(plansRes);
-      setAssemblies(asmsRes);
-      setMasterItems(itemsRes);
+
+      if (shouldFetchMeta && results[2] && results[3]) {
+        setAssemblies(results[2]);
+        setMasterItems(results[3]);
+      }
 
       // Initialize local editable structures from plansRes
       const schedMap = {};
       const actualsMap = {};
       const targetsMap = {};
-      plansRes.assemblies.forEach(asm => {
+      (plansRes.assemblies || []).forEach(asm => {
         targetsMap[asm.id] = asm.target_quantity || 0;
         schedMap[asm.id] = {};
         actualsMap[asm.id] = {};
-        asm.daywise_schedule.forEach(ds => {
+        (asm.daywise_schedule || []).forEach(ds => {
           schedMap[asm.id][ds.date] = ds.planned_quantity;
           actualsMap[asm.id][ds.date] = (ds.actual_quantity !== null && ds.actual_quantity !== undefined)
             ? ds.actual_quantity
@@ -226,7 +236,7 @@ export default function AssemblyPlanningView() {
       setShowNewAssemblyModal(false);
       setNewAssemblyForm({ assembly_code: '', name: '', description: '', customer: '', drawing_no: '' });
       setMessage({ type: 'success', text: 'Assembly product created successfully!' });
-      await loadAllData();
+      await loadAllData(true);
     } catch (err) {
       alert(err.message || 'Failed to create assembly');
     } finally {
@@ -241,7 +251,7 @@ export default function AssemblyPlanningView() {
     try {
       await deleteAssembly(asm.id);
       setMessage({ type: 'success', text: `Assembly ${asm.assembly_code} deleted.` });
-      await loadAllData();
+      await loadAllData(true);
     } catch (err) {
       alert(err.message || 'Failed to delete assembly');
     }
@@ -370,7 +380,7 @@ export default function AssemblyPlanningView() {
         type: 'success',
         text: `Successfully mapped ${itemsToAssign.length} items to ${showAssignItemModal.assembly_code} BOM!`
       });
-      await loadAllData();
+      await loadAllData(true);
     } catch (err) {
       console.error(err);
       alert(err.message || 'Failed to assign items to assembly BOM');
@@ -386,7 +396,7 @@ export default function AssemblyPlanningView() {
     try {
       await removeAssemblyBOMItem(assemblyId, bomId);
       setMessage({ type: 'success', text: `Item ${itemCode} removed from assembly.` });
-      await loadAllData();
+      await loadAllData(true);
     } catch (err) {
       alert(err.message || 'Failed to remove item');
     }
